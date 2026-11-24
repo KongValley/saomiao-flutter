@@ -1,0 +1,207 @@
+import 'package:flutter/material.dart';
+
+import '../../jobs/render_jobs.dart';
+import '../../state/page_models.dart';
+import '../theme.dart';
+
+class PageStrip extends StatelessWidget {
+  const PageStrip({
+    super.key,
+    required this.pages,
+    required this.currentIndex,
+    required this.renderOf,
+    required this.onSelect,
+    required this.onOpenActions,
+    required this.onReorder,
+    required this.onAdd,
+  });
+
+  final List<PageItem> pages;
+  final int currentIndex;
+  final RenderedPageResult? Function(String id) renderOf;
+  final void Function(int index) onSelect;
+  final void Function(PageItem page, int index) onOpenActions;
+  final void Function(int oldIndex, int newIndex) onReorder;
+  final VoidCallback onAdd;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 100,
+      decoration: const BoxDecoration(
+        color: AppColors.surface,
+        border: Border(top: BorderSide(color: AppColors.outline)),
+      ),
+      child: ReorderableListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        buildDefaultDragHandles: false,
+        itemCount: pages.length,
+        onReorderItem: onReorder,
+        proxyDecorator: (child, index, animation) {
+          return Material(
+            color: Colors.transparent,
+            elevation: 6,
+            borderRadius: BorderRadius.circular(12),
+            child: child,
+          );
+        },
+        footer: Padding(
+          padding: const EdgeInsets.only(left: 4),
+          child: Semantics(
+            button: true,
+            label: '添加页面',
+            child: InkWell(
+              onTap: onAdd,
+              borderRadius: BorderRadius.circular(12),
+              child: Container(
+                width: 62,
+                height: 78,
+                decoration: BoxDecoration(
+                  color: AppColors.surfaceLow,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: AppColors.inkMuted.withValues(alpha: 0.45),
+                    width: 1.5,
+                  ),
+                ),
+                child: const Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.add_rounded, size: 22, color: AppColors.inkSecondary),
+                    SizedBox(height: 2),
+                    Text(
+                      '添加',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.inkSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+        itemBuilder: (context, index) {
+          final page = pages[index];
+          final selected = index == currentIndex;
+          final rendered = renderOf(page.id);
+
+          return ReorderableDelayedDragStartListener(
+            key: ValueKey(page.id),
+            index: index,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: GestureDetector(
+                onSecondaryTap: () => onOpenActions(page, index),
+                child: InkWell(
+                  onTap: () {
+                    if (selected) {
+                      onOpenActions(page, index);
+                    } else {
+                      onSelect(index);
+                    }
+                  },
+                  borderRadius: BorderRadius.circular(12),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    width: 62,
+                    height: 78,
+                    decoration: BoxDecoration(
+                      color: AppColors.surfaceContainer,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: selected ? AppColors.seed : AppColors.outline,
+                        width: selected ? 2.2 : 1.2,
+                      ),
+                      boxShadow: selected
+                          ? [
+                              BoxShadow(
+                                color: AppColors.seed.withValues(alpha: 0.2),
+                                blurRadius: 8,
+                                offset: const Offset(0, 2),
+                              ),
+                            ]
+                          : null,
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        if (rendered != null)
+                          Image.memory(
+                            rendered.bytes,
+                            fit: BoxFit.cover,
+                            cacheWidth: 180,
+                            gaplessPlayback: true,
+                          )
+                        else
+                          const Center(
+                            child: SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ),
+                        Positioned(
+                          left: 4,
+                          bottom: 4,
+                          child: Container(
+                            constraints: const BoxConstraints(minWidth: 20),
+                            height: 20,
+                            padding: const EdgeInsets.symmetric(horizontal: 5),
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: selected
+                                  ? AppColors.seed
+                                  : Colors.white.withValues(alpha: 0.92),
+                              borderRadius: BorderRadius.circular(6),
+                              border: selected
+                                  ? null
+                                  : Border.all(color: AppColors.outline),
+                            ),
+                            child: Text(
+                              '${index + 1}',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                                color: selected ? Colors.white : AppColors.inkSecondary,
+                              ),
+                            ),
+                          ),
+                        ),
+                        if (selected)
+                          Positioned(
+                            top: 3,
+                            right: 3,
+                            child: GestureDetector(
+                              onTap: () => onOpenActions(page, index),
+                              child: Container(
+                                width: 22,
+                                height: 22,
+                                decoration: BoxDecoration(
+                                  color: AppColors.ink.withValues(alpha: 0.72),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: const Icon(
+                                  Icons.more_horiz_rounded,
+                                  size: 14,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
