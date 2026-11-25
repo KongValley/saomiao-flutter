@@ -1,6 +1,8 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:path/path.dart' as p;
 import 'package:share_plus/share_plus.dart';
 
 import 'app_storage.dart';
@@ -18,15 +20,18 @@ typedef SaveFileCallback = Future<String?> Function({
 });
 
 typedef ShareCallback = Future<ShareResult> Function(ShareParams params);
+typedef PickDirectoryCallback = Future<String?> Function({required String dialogTitle});
 
 class FileExporter {
   const FileExporter({
     this._saveFile,
     this._share,
+    this._pickDirectory,
   });
 
   final SaveFileCallback? _saveFile;
   final ShareCallback? _share;
+  final PickDirectoryCallback? _pickDirectory;
 
   Future<String> deliver({
     required AppStorage storage,
@@ -72,5 +77,35 @@ class FileExporter {
       return '';
     }
     return result.status == ShareResultStatus.success ? '已分享：$fileName' : '已打开系统分享';
+  }
+
+  Future<String> deliverBatchToDirectory({
+    required List<({String fileName, Uint8List bytes})> files,
+  }) async {
+    if (files.isEmpty) return '';
+    String? dirPath;
+    if (_pickDirectory != null) {
+      dirPath = await _pickDirectory(dialogTitle: '选择保存图片文件夹');
+    } else {
+      final uri = await FilePicker.pickDirectory(dialogTitle: '选择保存图片文件夹');
+      if (uri == null) return '';
+      if (uri.isScheme('file')) {
+        dirPath = uri.toFilePath();
+      } else {
+        // Android SAF content:// 目录不支持直接 File 路径写入，引导改用 ZIP 导出
+        throw StateError('当前系统目录授权暂不支持批量裸写，请使用「保存全部页图片（ZIP）」');
+      }
+    }
+    if (dirPath == null || dirPath.trim().isEmpty) return '';
+    final dir = Directory(dirPath);
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    for (final entry in files) {
+      final safeName = p.basename(entry.fileName);
+      final target = File(p.join(dir.path, safeName));
+      await target.writeAsBytes(entry.bytes, flush: true);
+    }
+    return '已导出 ${files.length} 个文件到文件夹';
   }
 }

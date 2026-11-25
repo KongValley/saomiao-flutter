@@ -15,6 +15,7 @@ class ProcessingBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!visible) return const SizedBox.shrink();
+    final pal = AppColors.of(context);
     return Positioned(
       top: 12,
       left: 12,
@@ -23,14 +24,14 @@ class ProcessingBanner extends StatelessWidget {
         alignment: Alignment.topRight,
         child: IgnorePointer(
           child: Material(
-            color: AppColors.surface,
+            color: pal.surface,
             elevation: 4,
             borderRadius: BorderRadius.circular(14),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: AppColors.outline),
+                border: Border.all(color: pal.outline),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -46,10 +47,10 @@ class ProcessingBanner extends StatelessWidget {
                       label,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
-                        color: AppColors.ink,
+                        color: pal.ink,
                       ),
                     ),
                   ),

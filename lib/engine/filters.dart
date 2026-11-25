@@ -801,3 +801,109 @@ Uint8List applyLumaDeltaRgba(
   }
   return rgba;
 }
+
+/// 去摩尔纹（拍屏幕增强）：平抑高频 RGB 彩斑与点阵网格，同时尽量保住文字边缘
+Uint8List descreenRgba(Uint8List rgba, int w, int h) {
+  if (w < 3 || h < 3) return rgba;
+  final n = w * h;
+  final out = Uint8List(n * 4);
+  for (var y = 0; y < h; y++) {
+    final ym1 = y > 0 ? y - 1 : 0;
+    final yp1 = y < h - 1 ? y + 1 : h - 1;
+    for (var x = 0; x < w; x++) {
+      final xm1 = x > 0 ? x - 1 : 0;
+      final xp1 = x < w - 1 ? x + 1 : w - 1;
+      var sumR = 0;
+      var sumG = 0;
+      var sumB = 0;
+      for (var yy = ym1; yy <= yp1; yy++) {
+        final wy = yy == y ? 2 : 1;
+        final row = yy * w;
+        for (var xx = xm1; xx <= xp1; xx++) {
+          final wgt = wy * (xx == x ? 2 : 1);
+          final p = (row + xx) * 4;
+          sumR += rgba[p] * wgt;
+          sumG += rgba[p + 1] * wgt;
+          sumB += rgba[p + 2] * wgt;
+        }
+      }
+      // Corner/edge weights are slightly less than 16; normalize safely
+      var wSum = 0;
+      for (var yy = ym1; yy <= yp1; yy++) {
+        final wy = yy == y ? 2 : 1;
+        for (var xx = xm1; xx <= xp1; xx++) {
+          wSum += wy * (xx == x ? 2 : 1);
+        }
+      }
+      final p = (y * w + x) * 4;
+      final avgR = sumR / wSum;
+      final avgG = sumG / wSum;
+      final avgB = sumB / wSum;
+      final origY = (77 * rgba[p] + 150 * rgba[p + 1] + 29 * rgba[p + 2]) >> 8;
+      final blurY = (77 * avgR + 150 * avgG + 29 * avgB) / 256.0;
+      // 亮度保留 45% 原图细节 + 55% 邻域平滑，色度按平滑结果重构以消去屏幕彩纹
+      final targetY = origY * 0.45 + blurY * 0.55;
+      final deltaY = targetY - blurY;
+      out[p] = clamp255(avgR + deltaY);
+      out[p + 1] = clamp255(avgG + deltaY);
+      out[p + 2] = clamp255(avgB + deltaY);
+      out[p + 3] = rgba[p + 3];
+    }
+  }
+  return out;
+}
+
+/// 灰度版去摩尔纹（针对拍屏幕网格纹理平滑）
+Uint8List descreenGray(Uint8List gray, int w, int h) {
+  if (w < 3 || h < 3) return gray;
+  final blur = _gauss3(gray, w, h);
+  final n = w * h;
+  final out = Uint8List(n);
+  for (var i = 0; i < n; i++) {
+    out[i] = ((gray[i] * 3 + blur[i] * 5 + 4) >> 3).clamp(0, 255);
+  }
+  return out;
+}
+
+/// 留红/蓝印章合成：黑字白底走锐利二值结果，同时保留归一化后的红色公章与蓝色手写签批
+Uint8List composeStampPreserveRgba(
+  Uint8List binaryGray,
+  Uint8List colorRgba,
+  int w,
+  int h,
+) {
+  final n = w * h;
+  final out = Uint8List(n * 4);
+  for (var i = 0, p = 0; i < n; i++, p += 4) {
+    final r = colorRgba[p];
+    final g = colorRgba[p + 1];
+    final b = colorRgba[p + 2];
+    final maxC = math.max(r, math.max(g, b));
+    final minC = math.min(r, math.min(g, b));
+    final chroma = maxC - minC;
+
+    final isRedStamp = r == maxC && chroma >= 26 && (r - g) >= 22 && (r - b) >= 22 && r >= 72;
+    final isBlueInk = b == maxC &&
+        chroma >= 24 &&
+        (b - r) >= 22 &&
+        b >= 68 &&
+        ((b - g) >= 4 || (g - r) >= 14);
+
+    if (isRedStamp || isBlueInk) {
+      // 适当提纯印章/签批色度，避免纸面灰底残留
+      final luma = (77 * r + 150 * g + 29 * b) / 256.0;
+      const sat = 1.18;
+      out[p] = clamp255(luma + (r - luma) * sat);
+      out[p + 1] = clamp255(luma + (g - luma) * sat);
+      out[p + 2] = clamp255(luma + (b - luma) * sat);
+      out[p + 3] = 255;
+    } else {
+      final bw = binaryGray[i] > 128 ? 255 : 0;
+      out[p] = bw;
+      out[p + 1] = bw;
+      out[p + 2] = bw;
+      out[p + 3] = 255;
+    }
+  }
+  return out;
+}

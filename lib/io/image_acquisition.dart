@@ -1,8 +1,26 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:pasteboard/pasteboard.dart';
+import 'package:path/path.dart' as p;
 
 const int kMaxImportFileBytes = 60 * 1024 * 1024; // 60MB
+
+const Set<String> kSupportedImageExtensions = <String>{
+  '.jpg',
+  '.jpeg',
+  '.png',
+  '.webp',
+  '.bmp',
+  '.heic',
+  '.heif',
+  '.gif',
+  '.tif',
+  '.tiff',
+};
 
 class PickedImageInput {
   const PickedImageInput({
@@ -159,6 +177,76 @@ class ImageAcquisition {
       rethrow;
     } catch (_) {
       return const <PickedImageEntry>[];
+    }
+  }
+
+  /// 选择 PDF 文件（用于漂白重排导入）
+  Future<List<String>> pickPdfFilePaths() async {
+    try {
+      final files = await FilePicker.pickFiles(
+        dialogTitle: '选择要导入的 PDF 文档',
+        type: FileType.custom,
+        allowedExtensions: const <String>['pdf'],
+      );
+      if (files.isEmpty) return const <String>[];
+      return files
+          .map((f) => f.path)
+          .whereType<String>()
+          .where((path) => path.isNotEmpty)
+          .toList(growable: false);
+    } catch (_) {
+      throw StateError('打开 PDF 文件选择器失败，请重试');
+    }
+  }
+
+  /// 从文件路径列表中分流图片与 PDF
+  ({List<PickedImageEntry> images, List<String> pdfPaths}) classifyFilePaths(
+    List<String> paths,
+  ) {
+    final images = <PickedImageEntry>[];
+    final pdfs = <String>[];
+    for (final path in paths) {
+      if (path.trim().isEmpty) continue;
+      final ext = p.extension(path).toLowerCase();
+      if (ext == '.pdf') {
+        pdfs.add(path);
+      } else if (kSupportedImageExtensions.contains(ext)) {
+        final file = File(path);
+        images.add(
+          PickedImageEntry(
+            name: p.basename(path),
+            readLength: () => file.length(),
+            readBytes: () => file.readAsBytes(),
+          ),
+        );
+      }
+    }
+    return (images: images, pdfPaths: pdfs);
+  }
+
+  /// 读取系统剪贴板中的图片或复制的图片/PDF 文件
+  Future<({List<PickedImageEntry> images, List<String> pdfPaths})> readFromClipboard() async {
+    try {
+      final imageBytes = await Pasteboard.image;
+      if (imageBytes != null && imageBytes.isNotEmpty) {
+        final now = DateTime.now();
+        final name = '剪贴板_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}${now.second.toString().padLeft(2, '0')}.png';
+        return (
+          images: <PickedImageEntry>[
+            PickedImageEntry.fromInput(
+              PickedImageInput(name: name, bytes: imageBytes),
+            ),
+          ],
+          pdfPaths: const <String>[],
+        );
+      }
+      final files = await Pasteboard.files();
+      if (files.isNotEmpty) {
+        return classifyFilePaths(files);
+      }
+      return (images: const <PickedImageEntry>[], pdfPaths: const <String>[]);
+    } catch (_) {
+      return (images: const <PickedImageEntry>[], pdfPaths: const <String>[]);
     }
   }
 }

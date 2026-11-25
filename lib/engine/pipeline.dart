@@ -134,11 +134,15 @@ Uint8List _grayToOpaqueRgba(Uint8List rgb, int n) {
   int w,
   int h,
   ScanOptions opts,
-  Uint8List lut,
-) {
+  Uint8List lut, {
+  bool applyDeskew = true,
+}) {
   var workRgba = compositeWhiteRgba(rgba, w * h);
   if (identical(workRgba, srcData)) {
     workRgba = Uint8List.fromList(srcData);
+  }
+  if (opts.descreen) {
+    workRgba = descreenRgba(workRgba, w, h);
   }
   final gray = toGray(workRgba, w, h);
   if (opts.denoise > 0) {
@@ -164,7 +168,7 @@ Uint8List _grayToOpaqueRgba(Uint8List rgb, int n) {
   }
   var curW = w;
   var curH = h;
-  if (opts.deskew) {
+  if (applyDeskew && opts.deskew) {
     final angle = detectSkewAngle(gray, w, h);
     if (angle != 0.0) {
       final r = deskewRotate(outData, w, h, 4, angle);
@@ -176,14 +180,18 @@ Uint8List _grayToOpaqueRgba(Uint8List rgb, int n) {
   return (data: outData, width: curW, height: curH, channels: 4);
 }
 
-({Uint8List data, int width, int height}) _runMonoPreprocessStage(
+({Uint8List data, int width, int height, double skewAngle}) _runMonoPreprocessStage(
   Uint8List rgba,
   int w,
   int h,
   ScanOptions opts,
-  Uint8List lut,
-) {
+  Uint8List lut, {
+  bool applyDeskew = true,
+}) {
   var gray = toGray(rgba, w, h);
+  if (opts.descreen) {
+    gray = descreenGray(gray, w, h);
+  }
   if (opts.shadow > 0) {
     final bg = makeBackgroundField(gray, w, h, opts.shadow);
     if (bg != null) {
@@ -200,13 +208,13 @@ Uint8List _grayToOpaqueRgba(Uint8List rgb, int n) {
   }
   var curW = w;
   var curH = h;
-  if (angle != 0.0) {
+  if (applyDeskew && angle != 0.0) {
     final r = deskewRotate(gray, w, h, 1, angle);
     gray = r.data;
     curW = r.width;
     curH = r.height;
   }
-  return (data: gray, width: curW, height: curH);
+  return (data: gray, width: curW, height: curH, skewAngle: angle);
 }
 
 RenderOutcome _finalizeOutput(
@@ -248,7 +256,7 @@ RenderOutcome _finalizeOutput(
     fh = r.height;
   }
 
-  final format = opts.mode == ScanMode.bw ? 'png' : 'jpeg';
+  final format = (opts.mode == ScanMode.bw || opts.mode == ScanMode.bwStamp) ? 'png' : 'jpeg';
   return RenderOutcome(
     data: finalData,
     width: fw,
@@ -319,6 +327,41 @@ RenderOutcome _renderPageImpl(RgbaSource? source, Object? options) {
     w = stage.width;
     h = stage.height;
     channels = stage.channels;
+  } else if (opts.mode == ScanMode.bwStamp) {
+    final colorStage = _runColorStage(
+      rgba,
+      srcData,
+      w,
+      h,
+      opts,
+      lut,
+      applyDeskew: false,
+    );
+    final mono = _runMonoPreprocessStage(
+      rgba,
+      w,
+      h,
+      opts,
+      lut,
+      applyDeskew: false,
+    );
+    var bin = binarizeGray(
+      mono.data,
+      w,
+      h,
+      opts.threshold,
+      suppressFlatBackground: opts.shadow > 0,
+    );
+    bin = despeckleBinary(bin, w, h);
+    var composed = composeStampPreserveRgba(bin, colorStage.data, w, h);
+    if (opts.deskew && mono.skewAngle != 0.0) {
+      final rotated = deskewRotate(composed, w, h, 4, mono.skewAngle);
+      composed = rotated.data;
+      w = rotated.width;
+      h = rotated.height;
+    }
+    outData = composed;
+    channels = 4;
   } else {
     final mono = _runMonoPreprocessStage(rgba, w, h, opts, lut);
     final gray = mono.data;

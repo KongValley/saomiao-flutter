@@ -393,3 +393,81 @@ double detectSkewAngle(Uint8List gray, int w, int h) {
   if (refined.abs() < 0.15 || refined.abs() > 15.0) return 0.0;
   return refined * _degToRad;
 }
+
+/// 自动检测对开书页中缝 X 位置（归一化 0.35..0.65，未找到明显阴影谷底时返回 0.5）
+double detectBookGutterX(Uint8List rgba, int w, int h) {
+  if (w < 40 || h < 20 || rgba.length < w * h * 4) return 0.5;
+  final gray = toGray(rgba, w, h);
+  final y0 = (h * 0.08).round();
+  final y1 = (h * 0.92).round();
+  final spanY = math.max(1, y1 - y0);
+
+  final colAvg = Float64List(w);
+  for (var x = 0; x < w; x++) {
+    var sum = 0;
+    for (var y = y0; y < y1; y++) {
+      sum += gray[y * w + x];
+    }
+    colAvg[x] = sum / spanY;
+  }
+
+  final xStart = (w * 0.35).round().clamp(1, w - 2);
+  final xEnd = (w * 0.65).round().clamp(xStart + 1, w - 1);
+  final radius = math.max(1, (w * 0.008).round());
+
+  var bestX = w ~/ 2;
+  var minScore = double.infinity;
+  var sumRange = 0.0;
+  var countRange = 0;
+  for (var x = xStart; x <= xEnd; x++) {
+    var localSum = 0.0;
+    var cnt = 0;
+    final l = math.max(0, x - radius);
+    final r = math.min(w - 1, x + radius);
+    for (var k = l; k <= r; k++) {
+      localSum += colAvg[k];
+      cnt++;
+    }
+    final avg = localSum / cnt;
+    sumRange += avg;
+    countRange++;
+    // 略微偏好靠近中心，避免边缘文字密集列干扰
+    final centerDist = ((x / w) - 0.5).abs();
+    final score = avg + centerDist * 35.0;
+    if (score < minScore) {
+      minScore = score;
+      bestX = x;
+    }
+  }
+
+  final meanRange = countRange > 0 ? sumRange / countRange : 255.0;
+  if (meanRange - colAvg[bestX] < 4.0) {
+    return 0.5;
+  }
+  return (bestX / w).clamp(0.35, 0.65);
+}
+
+/// 按归一化矩形裁剪 RGBA 图像
+PixelImage cropNormalizedRect(
+  Uint8List rgba,
+  int w,
+  int h,
+  double left,
+  double top,
+  double right,
+  double bottom,
+) {
+  final l = (left.clamp(0.0, 1.0) * w).round().clamp(0, w - 1);
+  final r = (right.clamp(0.0, 1.0) * w).round().clamp(l + 1, w);
+  final t = (top.clamp(0.0, 1.0) * h).round().clamp(0, h - 1);
+  final b = (bottom.clamp(0.0, 1.0) * h).round().clamp(t + 1, h);
+  final cw = r - l;
+  final ch = b - t;
+  final out = Uint8List(cw * ch * 4);
+  for (var y = 0; y < ch; y++) {
+    final srcRow = ((t + y) * w + l) * 4;
+    final dstRow = y * cw * 4;
+    out.setRange(dstRow, dstRow + cw * 4, rgba, srcRow);
+  }
+  return PixelImage(data: out, width: cw, height: ch, channels: 4);
+}

@@ -14,6 +14,11 @@ class ParamsSheetContent extends StatelessWidget {
     required this.onApplyAll,
     required this.onUndo,
     required this.onReset,
+    this.canUndoStep = false,
+    this.canRedoStep = false,
+    this.onUndoStep,
+    this.onRedoStep,
+    this.onAutoCropAll,
   });
 
   final ScanOptions options;
@@ -23,6 +28,11 @@ class ParamsSheetContent extends StatelessWidget {
   final VoidCallback onApplyAll;
   final VoidCallback onUndo;
   final VoidCallback onReset;
+  final bool canUndoStep;
+  final bool canRedoStep;
+  final VoidCallback? onUndoStep;
+  final VoidCallback? onRedoStep;
+  final VoidCallback? onAutoCropAll;
 
   static const List<({String title, List<ParamKey> keys})> _groups = [
     (
@@ -39,11 +49,42 @@ class ParamsSheetContent extends StatelessWidget {
     ),
   ];
 
+  bool _isThresholdDisabled(ParamRowMeta row) {
+    if (row.onlyMode == null) return false;
+    if (row.key == ParamKey.threshold) {
+      return options.mode != ScanMode.bw && options.mode != ScanMode.bwStamp;
+    }
+    return row.onlyMode != options.mode;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final pal = AppColors.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (onUndoStep != null || onRedoStep != null) ...[
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: canUndoStep ? onUndoStep : null,
+                  icon: const Icon(Icons.undo_rounded, size: 18),
+                  label: const Text('撤销一步'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: canRedoStep ? onRedoStep : null,
+                  icon: const Icon(Icons.redo_rounded, size: 18),
+                  label: const Text('重做'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+        ],
         for (final group in _groups) ...[
           Card(
             child: Padding(
@@ -53,10 +94,10 @@ class ParamsSheetContent extends StatelessWidget {
                 children: [
                   Text(
                     group.title,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w700,
-                      color: AppColors.inkMuted,
+                      color: pal.inkMuted,
                     ),
                   ),
                   const SizedBox(height: 4),
@@ -64,7 +105,7 @@ class ParamsSheetContent extends StatelessWidget {
                     _SliderRow(
                       row: row,
                       value: row.readFrom(options),
-                      disabled: row.onlyMode != null && row.onlyMode != options.mode,
+                      disabled: _isThresholdDisabled(row),
                       onChanged: (next) =>
                           onChange(<String, Object?>{row.fieldName: next}, immediate: false),
                     ),
@@ -82,9 +123,9 @@ class ParamsSheetContent extends StatelessWidget {
                   '自动纠偏',
                   style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
                 ),
-                subtitle: const Text(
+                subtitle: Text(
                   '检测文字行倾角并自动拉直（轻微裁边）',
-                  style: TextStyle(fontSize: 13, color: AppColors.inkMuted),
+                  style: TextStyle(fontSize: 13, color: pal.inkMuted),
                 ),
                 value: options.deskew,
                 onChanged: (v) =>
@@ -93,12 +134,26 @@ class ParamsSheetContent extends StatelessWidget {
               const Divider(height: 1),
               SwitchListTile(
                 title: const Text(
+                  '去摩尔纹（拍屏幕）',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+                ),
+                subtitle: Text(
+                  '抑制翻拍电脑或电视屏幕时的网格彩纹',
+                  style: TextStyle(fontSize: 13, color: pal.inkMuted),
+                ),
+                value: options.descreen,
+                onChanged: (v) =>
+                    onChange(<String, Object?>{'descreen': v}, immediate: true),
+              ),
+              const Divider(height: 1),
+              SwitchListTile(
+                title: const Text(
                   '反相显示',
                   style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
                 ),
-                subtitle: const Text(
+                subtitle: Text(
                   '黑底白字与白底黑字互转',
-                  style: TextStyle(fontSize: 13, color: AppColors.inkMuted),
+                  style: TextStyle(fontSize: 13, color: pal.inkMuted),
                 ),
                 value: options.invert,
                 onChanged: (v) =>
@@ -108,9 +163,9 @@ class ParamsSheetContent extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 12),
-        const Text(
-          '改动会实时预览；阈值只在黑白模式下有效。',
-          style: TextStyle(fontSize: 13, color: AppColors.inkMuted),
+        Text(
+          '改动会实时预览；阈值只在黑白 / 留红印章模式下有效。',
+          style: TextStyle(fontSize: 13, color: pal.inkMuted),
         ),
         const SizedBox(height: 14),
         Row(
@@ -130,6 +185,14 @@ class ParamsSheetContent extends StatelessWidget {
             ),
           ],
         ),
+        if (onAutoCropAll != null) ...[
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            onPressed: onAutoCropAll,
+            icon: const Icon(Icons.crop_free_rounded, size: 18),
+            label: Text('一键全部自动裁边（$pageCount 页）'),
+          ),
+        ],
         const SizedBox(height: 10),
         OutlinedButton.icon(
           onPressed: onReset,
@@ -156,6 +219,7 @@ class _SliderRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final pal = AppColors.of(context);
     final divisions = (row.max - row.min) ~/ row.step;
     final clamped = value.clamp(row.min, row.max);
     return Opacity(
@@ -168,10 +232,10 @@ class _SliderRow extends StatelessWidget {
               width: 68,
               child: Text(
                 row.label,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.w500,
-                  color: AppColors.inkSecondary,
+                  color: pal.inkSecondary,
                 ),
               ),
             ),
@@ -195,10 +259,10 @@ class _SliderRow extends StatelessWidget {
               child: Text(
                 row.unit.isEmpty ? '$clamped' : '$clamped ${row.unit}',
                 textAlign: TextAlign.right,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 14,
-                  fontFeatures: [FontFeature.tabularFigures()],
-                  color: AppColors.inkSecondary,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                  color: pal.inkSecondary,
                 ),
               ),
             ),

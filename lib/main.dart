@@ -38,23 +38,41 @@ class _SaomiaoAppState extends State<SaomiaoApp> {
     super.dispose();
   }
 
+  ThemeMode _resolveThemeMode(String raw) {
+    switch (raw) {
+      case 'light':
+        return ThemeMode.light;
+      case 'dark':
+        return ThemeMode.dark;
+      default:
+        return ThemeMode.system;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: '扫描件工坊',
-      debugShowCheckedModeBanner: false,
-      theme: buildAppTheme(),
-      locale: const Locale('zh', 'CN'),
-      supportedLocales: const [
-        Locale('zh', 'CN'),
-        Locale('en', 'US'),
-      ],
-      localizationsDelegates: const [
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
-      home: EditorScreen(controller: _controller),
+    return ListenableBuilder(
+      listenable: _controller,
+      builder: (context, _) {
+        return MaterialApp(
+          title: '扫描件工坊',
+          debugShowCheckedModeBanner: false,
+          theme: buildAppTheme(),
+          darkTheme: buildDarkTheme(),
+          themeMode: _resolveThemeMode(_controller.preferences.themeMode),
+          locale: const Locale('zh', 'CN'),
+          supportedLocales: const [
+            Locale('zh', 'CN'),
+            Locale('en', 'US'),
+          ],
+          localizationsDelegates: const [
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          home: EditorScreen(controller: _controller),
+        );
+      },
     );
   }
 }

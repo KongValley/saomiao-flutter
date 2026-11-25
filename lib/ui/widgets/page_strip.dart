@@ -27,11 +27,12 @@ class PageStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final pal = AppColors.of(context);
     return Container(
       height: 100,
-      decoration: const BoxDecoration(
-        color: AppColors.surface,
-        border: Border(top: BorderSide(color: AppColors.outline)),
+      decoration: BoxDecoration(
+        color: pal.surface,
+        border: Border(top: BorderSide(color: pal.outline)),
       ),
       child: ReorderableListView.builder(
         scrollDirection: Axis.horizontal,
@@ -59,24 +60,24 @@ class PageStrip extends StatelessWidget {
                 width: 62,
                 height: 78,
                 decoration: BoxDecoration(
-                  color: AppColors.surfaceLow,
+                  color: pal.surfaceLow,
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(
-                    color: AppColors.inkMuted.withValues(alpha: 0.45),
+                    color: pal.inkMuted.withValues(alpha: 0.45),
                     width: 1.5,
                   ),
                 ),
-                child: const Column(
+                child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(Icons.add_rounded, size: 22, color: AppColors.inkSecondary),
-                    SizedBox(height: 2),
+                    Icon(Icons.add_rounded, size: 22, color: pal.inkSecondary),
+                    const SizedBox(height: 2),
                     Text(
                       '添加',
                       style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
-                        color: AppColors.inkSecondary,
+                        color: pal.inkSecondary,
                       ),
                     ),
                   ],
@@ -89,6 +90,7 @@ class PageStrip extends StatelessWidget {
           final page = pages[index];
           final selected = index == currentIndex;
           final thumbBytes = thumbnailOf(page.id);
+          final hasMetaBadge = page.annotations.isNotEmpty || page.ocr != null;
 
           return ReorderableDelayedDragStartListener(
             key: ValueKey(page.id),
@@ -111,10 +113,10 @@ class PageStrip extends StatelessWidget {
                     width: 62,
                     height: 78,
                     decoration: BoxDecoration(
-                      color: AppColors.surfaceContainer,
+                      color: pal.surfaceContainer,
                       borderRadius: BorderRadius.circular(12),
                       border: Border.all(
-                        color: selected ? AppColors.seed : AppColors.outline,
+                        color: selected ? AppColors.seed : pal.outline,
                         width: selected ? 2.2 : 1.2,
                       ),
                       boxShadow: selected
@@ -157,22 +159,33 @@ class PageStrip extends StatelessWidget {
                             decoration: BoxDecoration(
                               color: selected
                                   ? AppColors.seed
-                                  : Colors.white.withValues(alpha: 0.92),
+                                  : pal.surface.withValues(alpha: 0.92),
                               borderRadius: BorderRadius.circular(6),
-                              border: selected
-                                  ? null
-                                  : Border.all(color: AppColors.outline),
+                              border: selected ? null : Border.all(color: pal.outline),
                             ),
                             child: Text(
                               '${index + 1}',
                               style: TextStyle(
                                 fontSize: 12,
                                 fontWeight: FontWeight.w700,
-                                color: selected ? Colors.white : AppColors.inkSecondary,
+                                color: selected ? Colors.white : pal.inkSecondary,
                               ),
                             ),
                           ),
                         ),
+                        if (hasMetaBadge && !selected)
+                          Positioned(
+                            top: 4,
+                            right: 4,
+                            child: Container(
+                              width: 8,
+                              height: 8,
+                              decoration: const BoxDecoration(
+                                color: AppColors.success,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                          ),
                         if (selected)
                           Positioned(
                             top: 3,

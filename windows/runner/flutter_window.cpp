@@ -25,6 +25,10 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  RegisterWindowsOcrChannel(
+      flutter_controller_->engine()->messenger(),
+      GetHandle(),
+      alive_flag_);
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -40,6 +44,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  alive_flag_->store(false);
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -65,6 +70,18 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
       break;
+    case kWmOcrComplete: {
+      std::unique_ptr<OcrAsyncPayload> payload(
+          reinterpret_cast<OcrAsyncPayload*>(lparam));
+      if (payload && payload->result) {
+        if (payload->ok) {
+          payload->result->Success(flutter::EncodableValue(payload->response));
+        } else {
+          payload->result->Error(payload->error_code, payload->error_message);
+        }
+      }
+      return 0;
+    }
   }
 
   return Win32Window::MessageHandler(hwnd, message, wparam, lparam);

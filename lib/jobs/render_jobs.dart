@@ -2,9 +2,12 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
+import 'package:image/image.dart' as img;
 
 import '../engine/detect.dart';
+import '../engine/geometry.dart';
 import '../engine/options.dart';
 import '../engine/pdf.dart';
 import '../engine/pipeline.dart';
@@ -12,6 +15,8 @@ import '../engine/resize.dart';
 import '../io/app_storage.dart';
 import '../io/pixel_io.dart';
 import '../state/page_models.dart';
+import 'annotation_compositor.dart';
+import 'watermark_rasterizer.dart';
 
 const String kAbortMessage = '处理已取消';
 const int _cacheKeep = 30;
@@ -33,14 +38,27 @@ class RenderedPageResult {
   final Uint8List? thumbBytes;
 }
 
-class ExportPdfOutcome {
-  const ExportPdfOutcome({
+class ExportArchiveOutcome {
+  const ExportArchiveOutcome({
     required this.bytes,
     required this.pageCount,
+    required this.files,
   });
 
   final Uint8List bytes;
   final int pageCount;
+  final List<({String fileName, Uint8List bytes})> files;
+}
+
+enum IdCardTemplate {
+  idCard('id_card', '身份证正反面', '按 85.6×54mm 标准比例上下居中'),
+  bankCard('bank_card', '银行卡 / 驾照', '标准卡证比例上下居中排版'),
+  twoUp('two_up', '双页合并 A4', '两页内容等宽上下排进一页 A4');
+
+  const IdCardTemplate(this.id, this.label, this.desc);
+  final String id;
+  final String label;
+  final String desc;
 }
 
 const List<int> _sha256K = <int>[
@@ -163,6 +181,16 @@ Uint8List? _encodeThumb(RenderOutcome rendered) {
   );
 }
 
+class ExportPdfOutcome {
+  const ExportPdfOutcome({
+    required this.bytes,
+    required this.pageCount,
+  });
+
+  final Uint8List bytes;
+  final int pageCount;
+}
+
 class _WorkerRenderRequest {
   const _WorkerRenderRequest({
     required this.sourceBytes,
@@ -170,6 +198,10 @@ class _WorkerRenderRequest {
     required this.optionsJson,
     required this.mime,
     required this.quality,
+    this.annotations = PageAnnotations.empty,
+    this.signatures = const <SignatureStampData>[],
+    this.watermarkTile,
+    this.watermarkOpacity = 0.20,
   });
 
   final Uint8List? sourceBytes;
@@ -177,6 +209,10 @@ class _WorkerRenderRequest {
   final Map<String, Object?> optionsJson;
   final String mime;
   final double quality;
+  final PageAnnotations annotations;
+  final List<SignatureStampData> signatures;
+  final RgbaSource? watermarkTile;
+  final double watermarkOpacity;
 }
 
 class _WorkerRenderResponse {
@@ -213,15 +249,32 @@ _WorkerRenderResponse _renderWorker(_WorkerRenderRequest req) {
   source = downscaleIfNeeded(source, kMaxSourcePixels);
   final opts = normalizeOptions(req.optionsJson);
   final rendered = renderPage(source, opts);
-  final outBytes = encodePixels(
+  final composited = compositePageOverlays(
     data: rendered.data,
     width: rendered.width,
     height: rendered.height,
     channels: rendered.channels,
+    annotations: req.annotations,
+    signatures: req.signatures,
+    watermarkTile: req.watermarkTile,
+    watermarkOpacity: req.watermarkOpacity,
+  );
+  final outBytes = encodePixels(
+    data: composited.data,
+    width: rendered.width,
+    height: rendered.height,
+    channels: composited.channels,
     mime: req.mime,
     quality: req.quality,
   );
-  final thumbBytes = _encodeThumb(rendered);
+  final thumbBase = RenderOutcome(
+    data: composited.data,
+    width: rendered.width,
+    height: rendered.height,
+    channels: composited.channels,
+    format: rendered.format,
+  );
+  final thumbBytes = _encodeThumb(thumbBase);
   return _WorkerRenderResponse(
     needsFallbackDecode: false,
     bytes: outBytes,
@@ -306,8 +359,11 @@ String computeRenderFingerprint(
   double quality,
 ) {
   final effective = normalizeOptions(options);
+  final annPart = page.annotations.isEmpty
+      ? ''
+      : '|ann:${jsonEncode(page.annotations.toJson())}';
   final text =
-      '$_cacheVersion|${page.id}|${page.sourceUri}|${page.sourceW}x${page.sourceH}|$mime|${quality.toStringAsFixed(4)}|${jsonEncode(effective.toJson())}';
+      '$_cacheVersion|${page.id}|${page.sourceUri}|${page.sourceW}x${page.sourceH}|$mime|${quality.toStringAsFixed(4)}|${jsonEncode(effective.toJson())}$annPart';
   return sha256Hex(utf8.encode(text));
 }
 
@@ -336,15 +392,44 @@ class RenderJobs {
     }
   }
 
+  Future<List<SignatureStampData>> _loadSignatureStamps(
+    PageAnnotations annotations,
+    List<SavedSignature> librarySigs,
+  ) async {
+    if (annotations.signatures.isEmpty) return const <SignatureStampData>[];
+    final byId = <String, SavedSignature>{for (final s in librarySigs) s.id: s};
+    final out = <SignatureStampData>[];
+    for (final pl in annotations.signatures) {
+      final meta = byId[pl.signatureId];
+      if (meta == null) continue;
+      final png = await storage.readSignatureBytes(meta.uri);
+      if (png == null || png.isEmpty) continue;
+      final decoded = decodeSignaturePngRgba(png);
+      if (decoded == null) continue;
+      out.add(
+        SignatureStampData(
+          placement: pl,
+          rgba: decoded.rgba,
+          width: decoded.width,
+          height: decoded.height,
+        ),
+      );
+    }
+    return out;
+  }
+
   Future<RenderedPageResult> renderPageTask(
     PageItem page,
     ScanOptions options, {
+    List<SavedSignature> signatures = const <SavedSignature>[],
     void Function(String stage)? onStage,
     bool Function()? shouldAbort,
     double quality = 0.92,
   }) async {
     final effective = normalizeOptions(options);
-    final mime = effective.mode == ScanMode.bw ? 'image/png' : 'image/jpeg';
+    final mime = (effective.mode == ScanMode.bw || effective.mode == ScanMode.bwStamp)
+        ? 'image/png'
+        : 'image/jpeg';
     final key = computeRenderFingerprint(page, effective, mime, quality);
 
     try {
@@ -366,6 +451,7 @@ class RenderJobs {
       effective,
       mime: mime,
       quality: quality,
+      signatures: signatures,
       onStage: onStage,
       shouldAbort: shouldAbort,
     );
@@ -385,6 +471,9 @@ class RenderJobs {
     ScanOptions effective, {
     required String mime,
     required double quality,
+    List<SavedSignature> signatures = const <SavedSignature>[],
+    RgbaSource? watermarkTile,
+    double watermarkOpacity = 0.20,
     void Function(String stage)? onStage,
     bool Function()? shouldAbort,
   }) async {
@@ -398,6 +487,8 @@ class RenderJobs {
     checkAbort();
     final sourceBytes = await storage.readSourceBytes(page.sourceUri);
     checkAbort();
+    final stamps = await _loadSignatureStamps(page.annotations, signatures);
+    checkAbort();
 
     onStage?.call('处理');
     var response = await compute(
@@ -408,6 +499,10 @@ class RenderJobs {
         optionsJson: effective.toJson(),
         mime: mime,
         quality: quality,
+        annotations: page.annotations,
+        signatures: stamps,
+        watermarkTile: watermarkTile,
+        watermarkOpacity: watermarkOpacity,
       ),
     );
     checkAbort();
@@ -423,6 +518,10 @@ class RenderJobs {
           optionsJson: effective.toJson(),
           mime: mime,
           quality: quality,
+          annotations: page.annotations,
+          signatures: stamps,
+          watermarkTile: watermarkTile,
+          watermarkOpacity: watermarkOpacity,
         ),
       );
       checkAbort();
@@ -483,19 +582,47 @@ class RenderJobs {
 
   Future<RenderedPageResult> exportImageTask(
     PageItem page,
-    ScanOptions options,
-  ) {
-    return renderPageTask(page, options);
+    ScanOptions options, {
+    List<SavedSignature> signatures = const <SavedSignature>[],
+    String? watermarkText,
+    double watermarkOpacity = 0.20,
+    double quality = 0.92,
+  }) async {
+    final watermarkTile = await rasterizeWatermarkTile(watermarkText);
+    if (watermarkTile == null) {
+      return renderPageTask(
+        page,
+        options,
+        signatures: signatures,
+        quality: quality,
+      );
+    }
+    final effective = normalizeOptions(options);
+    final mime = (effective.mode == ScanMode.bw || effective.mode == ScanMode.bwStamp)
+        ? 'image/png'
+        : 'image/jpeg';
+    return _renderToBytes(
+      page,
+      effective,
+      mime: mime,
+      quality: quality,
+      signatures: signatures,
+      watermarkTile: watermarkTile,
+      watermarkOpacity: watermarkOpacity,
+    );
   }
 
   Future<ExportPdfOutcome> exportPdfTask(
     List<PageItem> pages,
     PdfOptions pdfOptions, {
+    List<SavedSignature> signatures = const <SavedSignature>[],
     void Function(int completed, int total)? onProgress,
   }) async {
     if (pages.isEmpty) {
       throw StateError('导出失败：没有可导出的页面');
     }
+    final quality = pdfOptions.jpegQuality.clamp(0.4, 0.98);
+    final watermarkTile = await rasterizeWatermarkTile(pdfOptions.watermarkText);
     final inputs = <PdfPageInput>[];
     for (var i = 0; i < pages.length; i++) {
       final page = pages[i];
@@ -504,13 +631,17 @@ class RenderJobs {
           page,
           page.options,
           mime: 'image/jpeg',
-          quality: 0.92,
+          quality: quality,
+          signatures: signatures,
+          watermarkTile: watermarkTile,
+          watermarkOpacity: pdfOptions.watermarkOpacity,
         );
         inputs.add(
           PdfPageInput(
             jpegBytes: rendered.bytes,
             width: rendered.width,
             height: rendered.height,
+            ocrLines: pdfOptions.embedOcrText ? page.ocr?.lines : null,
           ),
         );
       } catch (err) {
@@ -526,4 +657,280 @@ class RenderJobs {
     );
     return ExportPdfOutcome(bytes: pdfBytes, pageCount: pages.length);
   }
+
+  Future<ExportArchiveOutcome> exportAllImagesZipTask(
+    List<PageItem> pages, {
+    List<SavedSignature> signatures = const <SavedSignature>[],
+    String? watermarkText,
+    double watermarkOpacity = 0.20,
+    double quality = 0.92,
+    void Function(int completed, int total)? onProgress,
+  }) async {
+    if (pages.isEmpty) {
+      throw StateError('导出失败：没有可导出的页面');
+    }
+    final watermarkTile = await rasterizeWatermarkTile(watermarkText);
+    final archive = Archive();
+    final files = <({String fileName, Uint8List bytes})>[];
+    for (var i = 0; i < pages.length; i++) {
+      final page = pages[i];
+      final effective = normalizeOptions(page.options);
+      final mime = (effective.mode == ScanMode.bw || effective.mode == ScanMode.bwStamp)
+          ? 'image/png'
+          : 'image/jpeg';
+      final ext = mime == 'image/png' ? 'png' : 'jpg';
+      final rendered = await _renderToBytes(
+        page,
+        effective,
+        mime: mime,
+        quality: quality,
+        signatures: signatures,
+        watermarkTile: watermarkTile,
+        watermarkOpacity: watermarkOpacity,
+      );
+      final idxStr = (i + 1).toString().padLeft(2, '0');
+      final fileName = 'page_$idxStr.$ext';
+      archive.addFile(ArchiveFile(fileName, rendered.bytes.length, rendered.bytes));
+      files.add((fileName: fileName, bytes: rendered.bytes));
+      onProgress?.call(i + 1, pages.length);
+    }
+    final encoded = await compute(_encodeZipWorker, archive);
+    return ExportArchiveOutcome(
+      bytes: encoded,
+      pageCount: pages.length,
+      files: files,
+    );
+  }
+
+  Future<double> detectBookGutterTask(PageItem page) async {
+    final sourceBytes = await storage.readSourceBytes(page.sourceUri);
+    var src = decodeBytesPureDart(sourceBytes, maxPixels: 900 * 900);
+    src ??= await decodeImageBytes(sourceBytes, maxPixels: 900 * 900);
+    return compute(_detectGutterWorker, src);
+  }
+
+  Future<({Uint8List leftBytes, int leftW, int leftH, Uint8List rightBytes, int rightW, int rightH})>
+      splitDoublePageTask(PageItem page, double splitX) async {
+    final sourceBytes = await storage.readSourceBytes(page.sourceUri);
+    var src = decodeBytesPureDart(sourceBytes, maxPixels: kMaxSourcePixels);
+    src ??= await decodeImageBytes(sourceBytes, maxPixels: kMaxSourcePixels);
+    return compute(
+      _splitDoublePageWorker,
+      _SplitDoublePageReq(source: src, splitX: splitX, rotate: page.options.rotate),
+    );
+  }
+
+  Future<Uint8List> composeIdCardTask({
+    required Uint8List frontBytes,
+    required ScanOptions frontOptions,
+    required Uint8List backBytes,
+    required ScanOptions backOptions,
+    required IdCardTemplate template,
+    String? watermarkText,
+    double watermarkOpacity = 0.20,
+  }) async {
+    var frontSrc = decodeBytesPureDart(frontBytes, maxPixels: kMaxSourcePixels);
+    frontSrc ??= await decodeImageBytes(frontBytes, maxPixels: kMaxSourcePixels);
+    var backSrc = decodeBytesPureDart(backBytes, maxPixels: kMaxSourcePixels);
+    backSrc ??= await decodeImageBytes(backBytes, maxPixels: kMaxSourcePixels);
+    final watermarkTile = await rasterizeWatermarkTile(watermarkText);
+    return compute(
+      _composeIdCardWorker,
+      _ComposeIdCardReq(
+        frontSrc: frontSrc,
+        frontOptions: frontOptions.toJson(),
+        backSrc: backSrc,
+        backOptions: backOptions.toJson(),
+        template: template,
+        watermarkTile: watermarkTile,
+        watermarkOpacity: watermarkOpacity,
+      ),
+    );
+  }
+}
+
+Uint8List _encodeZipWorker(Archive archive) {
+  final encoded = ZipEncoder().encode(archive);
+  return Uint8List.fromList(encoded);
+}
+
+double _detectGutterWorker(RgbaSource src) {
+  final small = downscaleMaxEdge(src, 420);
+  return detectBookGutterX(small.data, small.width, small.height);
+}
+
+class _SplitDoublePageReq {
+  const _SplitDoublePageReq({
+    required this.source,
+    required this.splitX,
+    required this.rotate,
+  });
+
+  final RgbaSource source;
+  final double splitX;
+  final int rotate;
+}
+
+({Uint8List leftBytes, int leftW, int leftH, Uint8List rightBytes, int rightW, int rightH})
+    _splitDoublePageWorker(_SplitDoublePageReq req) {
+  var work = req.source;
+  if (req.rotate != 0) {
+    final rot = rotateImage(work.data, work.width, work.height, 4, req.rotate);
+    work = RgbaSource(data: rot.data, width: rot.width, height: rot.height);
+  }
+  final s = req.splitX.clamp(0.15, 0.85);
+  final left = cropNormalizedRect(work.data, work.width, work.height, 0.0, 0.0, s, 1.0);
+  final right = cropNormalizedRect(work.data, work.width, work.height, s, 0.0, 1.0, 1.0);
+  final leftBytes = encodePixels(
+    data: left.data,
+    width: left.width,
+    height: left.height,
+    channels: 4,
+    mime: 'image/jpeg',
+    quality: 0.94,
+  );
+  final rightBytes = encodePixels(
+    data: right.data,
+    width: right.width,
+    height: right.height,
+    channels: 4,
+    mime: 'image/jpeg',
+    quality: 0.94,
+  );
+  return (
+    leftBytes: leftBytes,
+    leftW: left.width,
+    leftH: left.height,
+    rightBytes: rightBytes,
+    rightW: right.width,
+    rightH: right.height,
+  );
+}
+
+class _ComposeIdCardReq {
+  const _ComposeIdCardReq({
+    required this.frontSrc,
+    required this.frontOptions,
+    required this.backSrc,
+    required this.backOptions,
+    required this.template,
+    this.watermarkTile,
+    this.watermarkOpacity = 0.20,
+  });
+
+  final RgbaSource frontSrc;
+  final Map<String, Object?> frontOptions;
+  final RgbaSource backSrc;
+  final Map<String, Object?> backOptions;
+  final IdCardTemplate template;
+  final RgbaSource? watermarkTile;
+  final double watermarkOpacity;
+}
+
+Uint8List _composeIdCardWorker(_ComposeIdCardReq req) {
+  const outW = 1654; // A4 @ 200 DPI
+  const outH = 2339;
+  final canvas = img.Image(width: outW, height: outH, numChannels: 4);
+  img.fill(canvas, color: img.ColorRgba8(255, 255, 255, 255));
+
+  img.Image toImg(RenderOutcome r) {
+    final rgba = Uint8List(r.width * r.height * 4);
+    if (r.channels == 1) {
+      for (var i = 0, q = 0; i < r.width * r.height; i++, q += 4) {
+        final v = r.data[i];
+        rgba[q] = v;
+        rgba[q + 1] = v;
+        rgba[q + 2] = v;
+        rgba[q + 3] = 255;
+      }
+    } else {
+      rgba.setAll(0, r.data.sublist(0, r.width * r.height * 4));
+    }
+    return img.Image.fromBytes(
+      width: r.width,
+      height: r.height,
+      bytes: rgba.buffer,
+      numChannels: 4,
+      order: img.ChannelOrder.rgba,
+    );
+  }
+
+  final frontRendered = renderPage(req.frontSrc, req.frontOptions);
+  final backRendered = renderPage(req.backSrc, req.backOptions);
+  final frontImg = toImg(frontRendered);
+  final backImg = toImg(backRendered);
+
+  final int slotMaxW;
+  final int slotMaxH;
+  final bool forceCardRatio;
+  switch (req.template) {
+    case IdCardTemplate.idCard:
+    case IdCardTemplate.bankCard:
+      // 85.6 / 210 ≈ 0.408 (略放大至 56% 纸宽更易阅读打印)
+      slotMaxW = (outW * 0.56).round();
+      slotMaxH = (slotMaxW * (54.0 / 85.6)).round();
+      forceCardRatio = true;
+    case IdCardTemplate.twoUp:
+      slotMaxW = (outW * 0.84).round();
+      slotMaxH = (outH * 0.40).round();
+      forceCardRatio = false;
+  }
+
+  void placeSlot(img.Image src, int centerY) {
+    int targetW;
+    int targetH;
+    if (forceCardRatio) {
+      targetW = slotMaxW;
+      targetH = slotMaxH;
+    } else {
+      final scale = math.min(slotMaxW / src.width, slotMaxH / src.height);
+      targetW = math.max(1, (src.width * scale).round());
+      targetH = math.max(1, (src.height * scale).round());
+    }
+    final resized = img.copyResize(
+      src,
+      width: targetW,
+      height: targetH,
+      interpolation: img.Interpolation.linear,
+    );
+    final dstX = ((outW - targetW) / 2.0).round();
+    final dstY = (centerY - targetH / 2.0).round();
+    // 细边框方便剪裁对齐
+    img.drawRect(
+      canvas,
+      x1: dstX - 1,
+      y1: dstY - 1,
+      x2: dstX + targetW,
+      y2: dstY + targetH,
+      color: img.ColorRgba8(215, 222, 232, 255),
+      thickness: 2,
+    );
+    img.compositeImage(canvas, resized, dstX: dstX, dstY: dstY);
+  }
+
+  placeSlot(frontImg, (outH * 0.30).round());
+  placeSlot(backImg, (outH * 0.70).round());
+
+  var raw = canvas.getBytes(order: img.ChannelOrder.rgba);
+  if (req.watermarkTile != null) {
+    final composited = compositePageOverlays(
+      data: raw,
+      width: outW,
+      height: outH,
+      channels: 4,
+      annotations: PageAnnotations.empty,
+      signatures: const <SignatureStampData>[],
+      watermarkTile: req.watermarkTile,
+      watermarkOpacity: req.watermarkOpacity,
+    );
+    raw = composited.data;
+  }
+  return encodePixels(
+    data: raw,
+    width: outW,
+    height: outH,
+    channels: 4,
+    mime: 'image/jpeg',
+    quality: 0.94,
+  );
 }

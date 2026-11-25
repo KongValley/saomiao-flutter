@@ -3,6 +3,7 @@ import 'dart:collection';
 /// 扫描色彩模式
 enum ScanMode {
   bw('bw'),
+  bwStamp('bw_stamp'),
   gray('gray'),
   color('color');
 
@@ -76,6 +77,7 @@ class ScanOptions {
     this.corners,
     this.rotate = 0,
     this.deskew = false,
+    this.descreen = false,
     this.maxDim = 2400,
     this.invert = false,
   });
@@ -94,6 +96,7 @@ class ScanOptions {
   final List<CornerPoint>? corners; // null 或长度 4：TL, TR, BR, BL
   final int rotate; // 0 | 90 | 180 | 270
   final bool deskew;
+  final bool descreen;
   final int maxDim; // 600..6000
   final bool invert;
 
@@ -111,6 +114,7 @@ class ScanOptions {
     bool clearCorners = false,
     int? rotate,
     bool? deskew,
+    bool? descreen,
     int? maxDim,
     bool? invert,
   }) {
@@ -127,6 +131,7 @@ class ScanOptions {
       'corners': clearCorners ? null : (corners ?? this.corners),
       'rotate': rotate ?? this.rotate,
       'deskew': deskew ?? this.deskew,
+      'descreen': descreen ?? this.descreen,
       'maxDim': maxDim ?? this.maxDim,
       'invert': invert ?? this.invert,
     });
@@ -145,6 +150,7 @@ class ScanOptions {
         'denoise': denoise,
         'maxDim': maxDim,
         'deskew': deskew,
+        'descreen': descreen,
         'invert': invert,
       };
 
@@ -170,6 +176,7 @@ class ScanOptions {
         'corners': corners?.map((p) => p.toJson()).toList(growable: false),
         'rotate': rotate,
         'deskew': deskew,
+        'descreen': descreen,
         'maxDim': maxDim,
         'invert': invert,
       });
@@ -189,6 +196,7 @@ class ScanOptions {
         denoise != other.denoise ||
         rotate != other.rotate ||
         deskew != other.deskew ||
+        descreen != other.descreen ||
         maxDim != other.maxDim ||
         invert != other.invert) {
       return false;
@@ -216,6 +224,7 @@ class ScanOptions {
         corners == null ? null : Object.hashAll(corners!),
         rotate,
         deskew,
+        descreen,
         maxDim,
         invert,
       );
@@ -330,6 +339,7 @@ ScanOptions normalizeOptions(Object? partial) {
         corners: normalizeCorners(partial.corners),
         rotate: (((partial.rotate / 90).round() * 90) % 360 + 360) % 360,
         deskew: partial.deskew,
+        descreen: partial.descreen,
         maxDim: partial.maxDim.clamp(600, 6000),
         invert: partial.invert,
       );
@@ -384,6 +394,10 @@ ScanOptions normalizeOptions(Object? partial) {
     final deskew =
         rawDeskew == null ? ScanOptions.defaults.deskew : _toBool(rawDeskew);
 
+    final rawDescreen = partial['descreen'];
+    final descreen =
+        rawDescreen == null ? ScanOptions.defaults.descreen : _toBool(rawDescreen);
+
     final rawInvert = partial['invert'];
     final invert =
         rawInvert == null ? ScanOptions.defaults.invert : _toBool(rawInvert);
@@ -401,6 +415,7 @@ ScanOptions normalizeOptions(Object? partial) {
       corners: corners,
       rotate: rotate,
       deskew: deskew,
+      descreen: descreen,
       maxDim: maxDim,
       invert: invert,
     );

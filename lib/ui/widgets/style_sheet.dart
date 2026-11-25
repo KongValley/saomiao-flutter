@@ -11,15 +11,23 @@ class StyleSheetContent extends StatelessWidget {
     super.key,
     required this.options,
     required this.onPatch,
+    this.customPresets = const <CustomPreset>[],
+    this.onSaveCustomPreset,
+    this.onDeleteCustomPreset,
   });
 
   final ScanOptions options;
   final void Function(Map<String, Object?> patch) onPatch;
+  final List<CustomPreset> customPresets;
+  final Future<void> Function(String name)? onSaveCustomPreset;
+  final void Function(String id)? onDeleteCustomPreset;
 
   IconData _modeIcon(ScanMode mode) {
     switch (mode) {
       case ScanMode.bw:
         return Icons.description_outlined;
+      case ScanMode.bwStamp:
+        return Icons.approval_outlined;
       case ScanMode.gray:
         return Icons.image_outlined;
       case ScanMode.color:
@@ -27,47 +35,70 @@ class StyleSheetContent extends StatelessWidget {
     }
   }
 
+  Future<void> _promptSavePreset(BuildContext context) async {
+    if (onSaveCustomPreset == null) return;
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => const _SavePresetDialog(),
+    );
+    if (name != null && name.isNotEmpty) {
+      await onSaveCustomPreset!(name);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final paperDisabled = options.mode == ScanMode.bw;
+    final pal = AppColors.of(context);
+    final paperDisabled =
+        options.mode == ScanMode.bw || options.mode == ScanMode.bwStamp;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text(
+        Text(
           '扫描风格',
           style: TextStyle(
             fontSize: 13,
             fontWeight: FontWeight.w700,
-            color: AppColors.inkMuted,
+            color: pal.inkMuted,
           ),
         ),
         const SizedBox(height: 10),
-        Row(
-          children: [
-            for (var i = 0; i < kModeOptions.length; i++) ...[
-              if (i > 0) const SizedBox(width: 8),
-              Expanded(
-                child: _ModeCard(
-                  option: kModeOptions[i],
-                  icon: _modeIcon(kModeOptions[i].value),
-                  selected: options.mode == kModeOptions[i].value,
-                  onTap: () => onPatch(<String, Object?>{'mode': kModeOptions[i].value.value}),
-                ),
-              ),
-            ],
-          ],
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final colCount = constraints.maxWidth >= 320 ? 4 : 2;
+            const gap = 8.0;
+            final cardW = math.max(
+              0.0,
+              (constraints.maxWidth - gap * (colCount - 1)) / colCount,
+            );
+            return Wrap(
+              spacing: gap,
+              runSpacing: gap,
+              children: kModeOptions.map((opt) {
+                return SizedBox(
+                  width: cardW,
+                  child: _ModeCard(
+                    option: opt,
+                    icon: _modeIcon(opt.value),
+                    selected: options.mode == opt.value,
+                    onTap: () => onPatch(<String, Object?>{'mode': opt.value.value}),
+                  ),
+                );
+              }).toList(growable: false),
+            );
+          },
         ),
         const SizedBox(height: 20),
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            const Text(
+            Text(
               '纸张底色',
               style: TextStyle(
                 fontSize: 13,
                 fontWeight: FontWeight.w700,
-                color: AppColors.inkMuted,
+                color: pal.inkMuted,
               ),
             ),
             const SizedBox(width: 8),
@@ -75,7 +106,7 @@ class StyleSheetContent extends StatelessWidget {
               child: Text(
                 paperDisabled ? '仅灰度 / 彩色模式有效' : '调整纸面色温',
                 textAlign: TextAlign.end,
-                style: const TextStyle(fontSize: 13, color: AppColors.inkMuted),
+                style: TextStyle(fontSize: 13, color: pal.inkMuted),
               ),
             ),
           ],
@@ -102,15 +133,27 @@ class StyleSheetContent extends StatelessWidget {
                 },
         ),
         const SizedBox(height: 20),
-        const Text(
-          '一键预设',
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w700,
-            color: AppColors.inkMuted,
-          ),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                '一键预设',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: pal.inkMuted,
+                ),
+              ),
+            ),
+            if (onSaveCustomPreset != null)
+              TextButton.icon(
+                onPressed: () => _promptSavePreset(context),
+                icon: const Icon(Icons.bookmark_add_outlined, size: 17),
+                label: const Text('保存为预设'),
+              ),
+          ],
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: 8),
         LayoutBuilder(
           builder: (context, constraints) {
             final cardWidth = math.max(0.0, (constraints.maxWidth - 10) / 2);
@@ -127,10 +170,10 @@ class StyleSheetContent extends StatelessWidget {
                     child: Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: active ? const Color(0xFFEDF3FF) : AppColors.surfaceLow,
+                        color: active ? pal.accentBg : pal.surfaceLow,
                         borderRadius: BorderRadius.circular(14),
                         border: Border.all(
-                          color: active ? AppColors.seed : AppColors.outline,
+                          color: active ? AppColors.seed : pal.outline,
                           width: active ? 1.5 : 1,
                         ),
                       ),
@@ -142,15 +185,15 @@ class StyleSheetContent extends StatelessWidget {
                             style: TextStyle(
                               fontSize: 15,
                               fontWeight: FontWeight.w700,
-                              color: active ? const Color(0xFF1D4ED8) : AppColors.ink,
+                              color: active ? pal.accentText : pal.ink,
                             ),
                           ),
                           const SizedBox(height: 3),
                           Text(
                             preset.desc,
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 13,
-                              color: AppColors.inkMuted,
+                              color: pal.inkMuted,
                               height: 1.35,
                             ),
                           ),
@@ -163,10 +206,37 @@ class StyleSheetContent extends StatelessWidget {
             );
           },
         ),
+        if (customPresets.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          Text(
+            '我的预设',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: pal.inkMuted,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: customPresets.map((cp) {
+              final active = cp.isActive(options);
+              return InputChip(
+                label: Text(cp.name),
+                selected: active,
+                onPressed: () => onPatch(cp.patch),
+                onDeleted: onDeleteCustomPreset == null
+                    ? null
+                    : () => onDeleteCustomPreset!(cp.id),
+              );
+            }).toList(growable: false),
+          ),
+        ],
         const SizedBox(height: 14),
-        const Text(
+        Text(
           '选中的风格会立即应用到当前页，可随时切换。',
-          style: TextStyle(fontSize: 13, color: AppColors.inkMuted),
+          style: TextStyle(fontSize: 13, color: pal.inkMuted),
         ),
       ],
     );
@@ -188,30 +258,33 @@ class _ModeCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final tint = selected ? const Color(0xFF1D4ED8) : AppColors.inkSecondary;
+    final pal = AppColors.of(context);
+    final tint = selected ? pal.accentText : pal.inkSecondary;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(14),
       child: Container(
-        constraints: const BoxConstraints(minHeight: 96),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+        constraints: const BoxConstraints(minHeight: 88),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
         decoration: BoxDecoration(
-          color: selected ? const Color(0xFFEDF3FF) : AppColors.surfaceLow,
+          color: selected ? pal.accentBg : pal.surfaceLow,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
-            color: selected ? AppColors.seed : AppColors.outline,
+            color: selected ? AppColors.seed : pal.outline,
             width: selected ? 1.6 : 1,
           ),
         ),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(icon, size: 26, color: selected ? tint : AppColors.inkMuted),
-            const SizedBox(height: 6),
+            Icon(icon, size: 24, color: selected ? tint : pal.inkMuted),
+            const SizedBox(height: 5),
             Text(
               option.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontSize: 15,
+                fontSize: 14,
                 fontWeight: FontWeight.w700,
                 color: tint,
               ),
@@ -220,14 +293,62 @@ class _ModeCard extends StatelessWidget {
             Text(
               option.hint,
               textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontSize: 13,
-                color: selected ? tint : AppColors.inkMuted,
+                fontSize: 12,
+                color: selected ? tint : pal.inkMuted,
               ),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _SavePresetDialog extends StatefulWidget {
+  const _SavePresetDialog();
+
+  @override
+  State<_SavePresetDialog> createState() => _SavePresetDialogState();
+}
+
+class _SavePresetDialogState extends State<_SavePresetDialog> {
+  final TextEditingController _ctrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('保存当前参数为预设'),
+      content: SizedBox(
+        width: 300,
+        child: TextField(
+          controller: _ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: '预设名称',
+            hintText: '例如：高清发票 / 淡字合同',
+            border: OutlineInputBorder(),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_ctrl.text.trim()),
+          child: const Text('保存'),
+        ),
+      ],
     );
   }
 }

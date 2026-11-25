@@ -1,6 +1,6 @@
 # 扫描件工坊 · Flutter 跨平台版
 
-把文档照片在**设备本地**处理为平整、干净的扫描件，并导出多页 PDF。全程不联网、不上传、无需服务器，支持 **Android / iOS / Windows 桌面**。
+把文档照片在**设备本地**处理为平整、干净的扫描件，并导出多页 PDF。全程不联网、不上传、无需服务器，支持 **Android / Windows 桌面**。
 
 本工程基于原 Expo 版（`F:\workspace\saomiao-expo`）使用 Flutter 技术栈重新打造：
 - **核心算法与零依赖 PDF 生成器 100% 保持一致**（透视矫正、背景除法去阴影、Sauvola 二值化、自动四角检测、`/DCTDecode` 多页 PDF）。
@@ -62,7 +62,7 @@ flutter build windows --release
 ## 与原 Expo 版的主要改进
 
 1. **后台线程渲染**：利用 Dart `compute()` 在独立 Isolate 执行重计算，消除单线程卡顿。
-2. **原生全平台适配**：同一套代码库支持 Android、iOS 与 Windows 桌面端。
+2. **双端原生适配**：同一套代码库支持 Android 与 Windows 桌面端（均接入本地离线 OCR 与原生文件交互）。
 3. **Material 3 自适应交互**：
    - 宽屏（`>= 840dp`）自动切换为「左侧画布 + 右侧参数检验栏」双栏工作区；
    - 缩略图支持真正的长按拖放排序（`ReorderableListView`）；

@@ -25,6 +25,7 @@ class IoAppStorage implements AppStorage {
 
   Directory? _docRoot;
   Directory? _origDir;
+  Directory? _sigDir;
   Directory? _cacheRenderDir;
   Directory? _exportDir;
 
@@ -40,14 +41,17 @@ class IoAppStorage implements AppStorage {
     final temp = await (_tempDirProvider?.call() ?? getTemporaryDirectory());
     final root = Directory(p.join(docs.path, _rootFolder));
     final orig = Directory(p.join(root.path, 'orig'));
+    final sig = Directory(p.join(root.path, 'signatures'));
     final cacheRender = Directory(p.join(temp.path, _rootFolder, 'render'));
     final exportDir = Directory(p.join(temp.path, _rootFolder, 'export'));
     await root.create(recursive: true);
     await orig.create(recursive: true);
+    await sig.create(recursive: true);
     await cacheRender.create(recursive: true);
     await exportDir.create(recursive: true);
     _docRoot = root;
     _origDir = orig;
+    _sigDir = sig;
     _cacheRenderDir = cacheRender;
     _exportDir = exportDir;
   }
@@ -211,6 +215,295 @@ class IoAppStorage implements AppStorage {
     } catch (_) {
       return const <PageItem>[];
     }
+  }
+
+  Future<Object?> _tryDecodeJsonFile(File file) async {
+    try {
+      if (!await file.exists()) return null;
+      final rawText = await file.readAsString();
+      if (rawText.trim().isEmpty) return null;
+      return jsonDecode(rawText);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _writeJsonFileAtomic(String fileName, Object payload) async {
+    await _ensureDirs();
+    final metaFile = File(p.join(_docRoot!.path, fileName));
+    final bakFile = File(p.join(_docRoot!.path, '$fileName.bak'));
+    final tmpFile = File(p.join(_docRoot!.path, '$fileName.tmp.${++_tmpSeq}'));
+    final jsonText = jsonEncode(payload);
+
+    var movedMetaToBak = false;
+    try {
+      await tmpFile.writeAsString(jsonText, flush: true);
+      if (await metaFile.exists()) {
+        if (await bakFile.exists()) {
+          await bakFile.delete();
+        }
+        await metaFile.rename(bakFile.path);
+        movedMetaToBak = true;
+      }
+      await tmpFile.rename(metaFile.path);
+      if (await bakFile.exists()) {
+        try {
+          await bakFile.delete();
+        } catch (_) {}
+      }
+    } catch (_) {
+      if (movedMetaToBak && !await metaFile.exists() && await bakFile.exists()) {
+        try {
+          await bakFile.rename(metaFile.path);
+        } catch (_) {}
+      }
+      if (await tmpFile.exists()) {
+        try {
+          await tmpFile.delete();
+        } catch (_) {}
+      }
+      rethrow;
+    }
+  }
+
+  Future<Object?> _loadJsonFileWithRecovery(String fileName) async {
+    await _ensureDirs();
+    final metaFile = File(p.join(_docRoot!.path, fileName));
+    final bakFile = File(p.join(_docRoot!.path, '$fileName.bak'));
+    var decoded = await _tryDecodeJsonFile(metaFile);
+    if (decoded != null) return decoded;
+    decoded = await _tryDecodeJsonFile(bakFile);
+    if (decoded != null) return decoded;
+    final staged = <({File file, DateTime modified})>[];
+    await for (final entity in _docRoot!.list()) {
+      if (entity is! File) continue;
+      final name = p.basename(entity.path);
+      if (name == '$fileName.tmp' || name.startsWith('$fileName.tmp.')) {
+        final stat = await entity.stat();
+        staged.add((file: entity, modified: stat.modified));
+      }
+    }
+    staged.sort((a, b) => b.modified.compareTo(a.modified));
+    for (final entry in staged) {
+      decoded = await _tryDecodeJsonFile(entry.file);
+      if (decoded != null) return decoded;
+    }
+    return null;
+  }
+
+  Future<({List<PageItem> pages, bool migrated})> _resolvePageItems(List<dynamic> rawList) async {
+    final out = <PageItem>[];
+    var migrated = false;
+    for (final row in rawList) {
+      final item = PageItem.tryFromJson(row);
+      if (item == null) continue;
+      final resolved = await _resolveExistingSource(item.sourceUri);
+      if (resolved == null) continue;
+      if (resolved.migratedSourceUri != null) {
+        out.add(item.copyWith(sourceUri: resolved.migratedSourceUri));
+        migrated = true;
+      } else {
+        out.add(item);
+      }
+    }
+    return (pages: out, migrated: migrated);
+  }
+
+  @override
+  Future<DocumentLibrary?> loadLibrary() async {
+    try {
+      await _ensureDirs();
+      final raw = await _loadJsonFileWithRecovery('documents.json');
+      if (raw is Map) {
+        final rawDocs = raw['documents'];
+        if (rawDocs is List) {
+          final docs = <ScanDocument>[];
+          var migrated = false;
+          for (final entry in rawDocs) {
+            final parsed = ScanDocument.tryFromJson(entry);
+            if (parsed == null) continue;
+            final resolved = await _resolvePageItems(
+              parsed.pages.map((p) => p.toJson()).toList(growable: false),
+            );
+            if (resolved.migrated) migrated = true;
+            docs.add(parsed.copyWith(pages: List<PageItem>.unmodifiable(resolved.pages)));
+          }
+          if (docs.isNotEmpty) {
+            final activeIdRaw = raw['activeId'];
+            final activeId = activeIdRaw is String && docs.any((d) => d.id == activeIdRaw)
+                ? activeIdRaw
+                : docs.first.id;
+            final rawFolders = raw['customFolders'];
+            final customFolders = <String>[
+              if (rawFolders is List)
+                for (final f in rawFolders)
+                  if (f is String && f.trim().isNotEmpty) f.trim(),
+            ];
+            final lib = DocumentLibrary(
+              documents: List<ScanDocument>.unmodifiable(docs),
+              activeId: activeId,
+              customFolders: List<String>.unmodifiable(customFolders),
+            );
+            if (migrated) {
+              try {
+                await saveLibrary(lib);
+              } catch (_) {}
+            }
+            return lib;
+          }
+        }
+      }
+
+      // 兼容旧版单文档 pages.json 自动迁移
+      final legacyPages = await loadPages();
+      if (legacyPages.isEmpty) return null;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final doc = ScanDocument(
+        id: 'doc_default',
+        title: '默认文档',
+        folder: '默认',
+        createdAt: now,
+        updatedAt: now,
+        pages: legacyPages,
+        currentIndex: 0,
+      );
+      return DocumentLibrary(documents: <ScanDocument>[doc], activeId: doc.id);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Future<void> saveLibrary(DocumentLibrary library) {
+    final payload = <String, Object?>{
+      'activeId': library.activeId,
+      'customFolders': library.customFolders,
+      'documents': library.documents.map((d) => d.toJson()).toList(growable: false),
+    };
+    final activePages = List<PageItem>.unmodifiable(library.activeDocument.pages);
+    final next = _saveChain.then((_) async {
+      await _writeJsonFileAtomic('documents.json', payload);
+      await _writePagesAtomic(activePages);
+    });
+    _saveChain = next.catchError((_) {});
+    return next;
+  }
+
+  @override
+  Future<AppPreferences> loadPreferences() async {
+    try {
+      final raw = await _loadJsonFileWithRecovery('prefs.json');
+      return AppPreferences.tryFromJson(raw);
+    } catch (_) {
+      return const AppPreferences();
+    }
+  }
+
+  @override
+  Future<void> savePreferences(AppPreferences prefs) {
+    final next = _saveChain.then((_) => _writeJsonFileAtomic('prefs.json', prefs.toJson()));
+    _saveChain = next.catchError((_) {});
+    return next;
+  }
+
+  @override
+  Future<List<CustomPreset>> loadCustomPresets() async {
+    try {
+      final raw = await _loadJsonFileWithRecovery('presets.json');
+      if (raw is! List) return const <CustomPreset>[];
+      final out = <CustomPreset>[];
+      for (final item in raw) {
+        final p = CustomPreset.tryFromJson(item);
+        if (p != null) out.add(p);
+      }
+      return out;
+    } catch (_) {
+      return const <CustomPreset>[];
+    }
+  }
+
+  @override
+  Future<void> saveCustomPresets(List<CustomPreset> presets) {
+    final payload = presets.map((e) => e.toJson()).toList(growable: false);
+    final next = _saveChain.then((_) => _writeJsonFileAtomic('presets.json', payload));
+    _saveChain = next.catchError((_) {});
+    return next;
+  }
+
+  @override
+  Future<List<SavedSignature>> loadSignatures() async {
+    try {
+      await _ensureDirs();
+      final raw = await _loadJsonFileWithRecovery('signatures.json');
+      if (raw is! List) return const <SavedSignature>[];
+      final out = <SavedSignature>[];
+      for (final item in raw) {
+        final sig = SavedSignature.tryFromJson(item);
+        if (sig == null) continue;
+        final bytes = await readSignatureBytes(sig.uri);
+        if (bytes != null && bytes.isNotEmpty) {
+          out.add(sig);
+        }
+      }
+      return out;
+    } catch (_) {
+      return const <SavedSignature>[];
+    }
+  }
+
+  @override
+  Future<void> saveSignatures(List<SavedSignature> signatures) {
+    final payload = signatures.map((e) => e.toJson()).toList(growable: false);
+    final next = _saveChain.then((_) => _writeJsonFileAtomic('signatures.json', payload));
+    _saveChain = next.catchError((_) {});
+    return next;
+  }
+
+  @override
+  Future<String> saveSignatureBytes(Uint8List pngBytes, String sigId) async {
+    await _ensureDirs();
+    final rel = 'signatures/$sigId.png';
+    final target = File(p.join(_sigDir!.path, '$sigId.png'));
+    final tmp = File(p.join(_sigDir!.path, '.tmp_$sigId.${++_tmpSeq}.png'));
+    try {
+      await tmp.writeAsBytes(pngBytes, flush: true);
+      if (await target.exists()) await target.delete();
+      await tmp.rename(target.path);
+    } catch (_) {
+      if (await tmp.exists()) {
+        try {
+          await tmp.delete();
+        } catch (_) {}
+      }
+      rethrow;
+    }
+    return rel;
+  }
+
+  @override
+  Future<Uint8List?> readSignatureBytes(String uri) async {
+    try {
+      await _ensureDirs();
+      final base = _extractBasename(uri);
+      if (base.isEmpty || base == '.' || base == '..') return null;
+      final file = File(p.join(_sigDir!.path, base));
+      if (!await file.exists()) return null;
+      final bytes = await file.readAsBytes();
+      return bytes.isEmpty ? null : bytes;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Future<void> deleteSignatureBytes(String uri) async {
+    try {
+      await _ensureDirs();
+      final base = _extractBasename(uri);
+      if (base.isEmpty || base == '.' || base == '..') return;
+      final file = File(p.join(_sigDir!.path, base));
+      if (await file.exists()) await file.delete();
+    } catch (_) {}
   }
 
   @override

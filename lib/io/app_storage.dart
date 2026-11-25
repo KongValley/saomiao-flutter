@@ -23,6 +23,21 @@ abstract interface class AppStorage {
   Future<List<PageItem>> loadPages();
   Future<void> savePages(List<PageItem> pages);
 
+  Future<DocumentLibrary?> loadLibrary();
+  Future<void> saveLibrary(DocumentLibrary library);
+
+  Future<AppPreferences> loadPreferences();
+  Future<void> savePreferences(AppPreferences prefs);
+
+  Future<List<CustomPreset>> loadCustomPresets();
+  Future<void> saveCustomPresets(List<CustomPreset> presets);
+
+  Future<List<SavedSignature>> loadSignatures();
+  Future<void> saveSignatures(List<SavedSignature> signatures);
+  Future<String> saveSignatureBytes(Uint8List pngBytes, String sigId);
+  Future<Uint8List?> readSignatureBytes(String uri);
+  Future<void> deleteSignatureBytes(String uri);
+
   Future<String> saveSourceBytes(Uint8List bytes, String pageId, String? fileName);
   Future<Uint8List> readSourceBytes(String sourceUri);
   Future<void> deleteSource(String sourceUri);
@@ -49,6 +64,11 @@ class MemoryAppStorage implements AppStorage {
   final Map<String, ({CachedRenderEntry entry, int touched})> _cache =
       <String, ({CachedRenderEntry entry, int touched})>{};
   List<PageItem> _pages = const <PageItem>[];
+  DocumentLibrary? _library;
+  AppPreferences _prefs = const AppPreferences();
+  List<CustomPreset> _presets = const <CustomPreset>[];
+  List<SavedSignature> _signatures = const <SavedSignature>[];
+  final Map<String, Uint8List> _signatureBytes = <String, Uint8List>{};
   int _clock = 0;
 
   @override
@@ -60,6 +80,69 @@ class MemoryAppStorage implements AppStorage {
   @override
   Future<void> savePages(List<PageItem> pages) async {
     _pages = List<PageItem>.unmodifiable(pages);
+  }
+
+  @override
+  Future<DocumentLibrary?> loadLibrary() async {
+    if (_library != null) return _library;
+    final legacyPages = await loadPages();
+    if (legacyPages.isEmpty) return null;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final doc = ScanDocument(
+      id: 'doc_default',
+      title: '默认文档',
+      folder: '默认',
+      createdAt: now,
+      updatedAt: now,
+      pages: legacyPages,
+      currentIndex: 0,
+    );
+    return DocumentLibrary(documents: <ScanDocument>[doc], activeId: doc.id);
+  }
+
+  @override
+  Future<void> saveLibrary(DocumentLibrary library) async {
+    _library = library;
+    await savePages(library.activeDocument.pages);
+  }
+
+  @override
+  Future<AppPreferences> loadPreferences() async => _prefs;
+
+  @override
+  Future<void> savePreferences(AppPreferences prefs) async {
+    _prefs = prefs;
+  }
+
+  @override
+  Future<List<CustomPreset>> loadCustomPresets() async => _presets;
+
+  @override
+  Future<void> saveCustomPresets(List<CustomPreset> presets) async {
+    _presets = List<CustomPreset>.unmodifiable(presets);
+  }
+
+  @override
+  Future<List<SavedSignature>> loadSignatures() async => _signatures;
+
+  @override
+  Future<void> saveSignatures(List<SavedSignature> signatures) async {
+    _signatures = List<SavedSignature>.unmodifiable(signatures);
+  }
+
+  @override
+  Future<String> saveSignatureBytes(Uint8List pngBytes, String sigId) async {
+    final uri = 'mem-sig://$sigId';
+    _signatureBytes[uri] = pngBytes;
+    return uri;
+  }
+
+  @override
+  Future<Uint8List?> readSignatureBytes(String uri) async => _signatureBytes[uri];
+
+  @override
+  Future<void> deleteSignatureBytes(String uri) async {
+    _signatureBytes.remove(uri);
   }
 
   @override
