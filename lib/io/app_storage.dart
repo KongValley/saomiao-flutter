@@ -1,7 +1,7 @@
 import 'dart:typed_data';
 
 import '../state/page_models.dart';
-import 'app_storage_io.dart' if (dart.library.js_interop) 'app_storage_web.dart';
+import 'app_storage_io.dart';
 
 class CachedRenderEntry {
   const CachedRenderEntry({
@@ -37,13 +37,13 @@ abstract interface class AppStorage {
   );
   Future<void> pruneCached(int keep);
 
-  /// 在原生端写临时导出文件供系统分享；Web 端返回 null（直接用 XFile.fromData）
+  /// 在原生端写临时导出文件供系统分享
   Future<String?> writeExportTempFile(Uint8List bytes, String fileName);
 }
 
 AppStorage createAppStorage() => createPlatformStorage();
 
-/// 内存存储（用于单元测试 & Web 降级复用）
+/// 内存存储（用于单元测试）
 class MemoryAppStorage implements AppStorage {
   final Map<String, Uint8List> _sources = <String, Uint8List>{};
   final Map<String, ({CachedRenderEntry entry, int touched})> _cache =

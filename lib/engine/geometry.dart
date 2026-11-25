@@ -172,54 +172,6 @@ Uint8List perspectiveTransform(
   }
 
   final out = Uint8List(outW * outH * 4);
-  for (var y = 0; y < outH; y++) {
-    _perspectiveTransformRow(data, w, h, H, outW, y, out);
-  }
-  return out;
-}
-
-Future<Uint8List> perspectiveTransformAsync(
-  Uint8List data,
-  int w,
-  int h,
-  List<List<double>> quad,
-  int outW,
-  int outH, {
-  required Future<void> Function() maybeYield,
-}) async {
-  if (!_isConvexPixelQuad(quad)) {
-    throw StateError('透视矫正失败：四个角点需构成凸四边形，请重新框选');
-  }
-  final dst = <List<double>>[
-    <double>[0, 0],
-    <double>[outW.toDouble(), 0],
-    <double>[outW.toDouble(), outH.toDouble()],
-    <double>[0, outH.toDouble()],
-  ];
-  final H = solveHomography(dst, quad);
-  if (H == null) {
-    throw StateError('透视矫正失败：四个角点退化，请重新框选');
-  }
-
-  final out = Uint8List(outW * outH * 4);
-  for (var y = 0; y < outH; y++) {
-    _perspectiveTransformRow(data, w, h, H, outW, y, out);
-    if ((y & 31) == 31) {
-      await maybeYield();
-    }
-  }
-  return out;
-}
-
-void _perspectiveTransformRow(
-  Uint8List data,
-  int w,
-  int h,
-  Float64List H,
-  int outW,
-  int y,
-  Uint8List out,
-) {
   final h0 = H[0];
   final h1 = H[1];
   final h2 = H[2];
@@ -230,108 +182,45 @@ void _perspectiveTransformRow(
   final h7 = H[7];
   final maxX = w - 1;
   final maxY = h - 1;
-  final cy = y + 0.5;
-  final baseY = h1 * cy + h2;
-  final baseSy = h4 * cy + h5;
-  final baseDen = h7 * cy + 1.0;
-  var sxNum = h0 * 0.5 + baseY;
-  var syNum = h3 * 0.5 + baseSy;
-  var den = h6 * 0.5 + baseDen;
-  var p = y * outW * 4;
-  for (var x = 0; x < outW; x++, p += 4) {
-    final inv = 1.0 / den;
-    var fx = sxNum * inv - 0.5;
-    var fy = syNum * inv - 0.5;
-    fx = fx < 0 ? 0.0 : (fx > maxX ? maxX.toDouble() : fx);
-    fy = fy < 0 ? 0.0 : (fy > maxY ? maxY.toDouble() : fy);
-    final x0 = fx.toInt();
-    final y0 = fy.toInt();
-    final ax = fx - x0;
-    final ay = fy - y0;
-    final x1 = x0 < maxX ? x0 + 1 : x0;
-    final y1 = y0 < maxY ? y0 + 1 : y0;
-    final i00 = (y0 * w + x0) * 4;
-    final i01 = (y0 * w + x1) * 4;
-    final i10 = (y1 * w + x0) * 4;
-    final i11 = (y1 * w + x1) * 4;
-    final w00 = (1.0 - ax) * (1.0 - ay);
-    final w01 = ax * (1.0 - ay);
-    final w10 = (1.0 - ax) * ay;
-    final w11 = ax * ay;
-    out[p] = clamp255(data[i00] * w00 + data[i01] * w01 + data[i10] * w10 + data[i11] * w11);
-    out[p + 1] = clamp255(data[i00 + 1] * w00 + data[i01 + 1] * w01 + data[i10 + 1] * w10 + data[i11 + 1] * w11);
-    out[p + 2] = clamp255(data[i00 + 2] * w00 + data[i01 + 2] * w01 + data[i10 + 2] * w10 + data[i11 + 2] * w11);
-    out[p + 3] = clamp255(data[i00 + 3] * w00 + data[i01 + 3] * w01 + data[i10 + 3] * w10 + data[i11 + 3] * w11);
-    sxNum += h0;
-    syNum += h3;
-    den += h6;
-  }
-}
-
-({int nw, int nh, double sin, double cos})? _prepareDeskew(
-  int w,
-  int h,
-  int channels,
-  double angle,
-) {
-  if (angle.abs() < 0.0009 || w < 8 || h < 8 || channels < 1) return null;
-  final sin = math.sin(angle);
-  final cos = math.cos(angle);
-  final absSin = sin.abs();
-  final insetX = ((h / 2.0) * absSin).ceil() + 1;
-  final insetY = ((w / 2.0) * absSin).ceil() + 1;
-  final nw = w - 2 * insetX;
-  final nh = h - 2 * insetY;
-  if (nw < w * 0.5 || nh < h * 0.5) return null;
-  return (nw: nw, nh: nh, sin: sin, cos: cos);
-}
-
-void _deskewRotateRow(
-  Uint8List src,
-  Uint8List out,
-  int w,
-  int h,
-  int nw,
-  int nh,
-  int channels,
-  double sin,
-  double cos,
-  int y,
-) {
-  final ccx = w / 2.0;
-  final ccy = h / 2.0;
-  final ocx = nw / 2.0;
-  final ocy = nh / 2.0;
-  final maxX = w - 1;
-  final maxY = h - 1;
-  final dy = y + 0.5 - ocy;
-  var p = y * nw * channels;
-  for (var x = 0; x < nw; x++, p += channels) {
-    final dx = x + 0.5 - ocx;
-    var fx = ccx + dx * cos + dy * sin - 0.5;
-    var fy = ccy - dx * sin + dy * cos - 0.5;
-    fx = fx < 0 ? 0.0 : (fx > maxX ? maxX.toDouble() : fx);
-    fy = fy < 0 ? 0.0 : (fy > maxY ? maxY.toDouble() : fy);
-    final x0 = fx.toInt();
-    final y0 = fy.toInt();
-    final ax = fx - x0;
-    final ay = fy - y0;
-    final x1 = x0 < maxX ? x0 + 1 : x0;
-    final y1 = y0 < maxY ? y0 + 1 : y0;
-    final i00 = (y0 * w + x0) * channels;
-    final i01 = (y0 * w + x1) * channels;
-    final i10 = (y1 * w + x0) * channels;
-    final i11 = (y1 * w + x1) * channels;
-    final w00 = (1.0 - ax) * (1.0 - ay);
-    final w01 = ax * (1.0 - ay);
-    final w10 = (1.0 - ax) * ay;
-    final w11 = ax * ay;
-    for (var c = 0; c < channels; c++) {
-      out[p + c] = clamp255(
-        src[i00 + c] * w00 + src[i01 + c] * w01 + src[i10 + c] * w10 + src[i11 + c] * w11,
-      );
+  for (var y = 0; y < outH; y++) {
+    final cy = y + 0.5;
+    final baseY = h1 * cy + h2;
+    final baseSy = h4 * cy + h5;
+    final baseDen = h7 * cy + 1.0;
+    var sxNum = h0 * 0.5 + baseY;
+    var syNum = h3 * 0.5 + baseSy;
+    var den = h6 * 0.5 + baseDen;
+    var p = y * outW * 4;
+    for (var x = 0; x < outW; x++, p += 4) {
+      final inv = 1.0 / den;
+      var fx = sxNum * inv - 0.5;
+      var fy = syNum * inv - 0.5;
+      fx = fx < 0 ? 0.0 : (fx > maxX ? maxX.toDouble() : fx);
+      fy = fy < 0 ? 0.0 : (fy > maxY ? maxY.toDouble() : fy);
+      final x0 = fx.toInt();
+      final y0 = fy.toInt();
+      final ax = fx - x0;
+      final ay = fy - y0;
+      final x1 = x0 < maxX ? x0 + 1 : x0;
+      final y1 = y0 < maxY ? y0 + 1 : y0;
+      final i00 = (y0 * w + x0) * 4;
+      final i01 = (y0 * w + x1) * 4;
+      final i10 = (y1 * w + x0) * 4;
+      final i11 = (y1 * w + x1) * 4;
+      final w00 = (1.0 - ax) * (1.0 - ay);
+      final w01 = ax * (1.0 - ay);
+      final w10 = (1.0 - ax) * ay;
+      final w11 = ax * ay;
+      out[p] = clamp255(data[i00] * w00 + data[i01] * w01 + data[i10] * w10 + data[i11] * w11);
+      out[p + 1] = clamp255(data[i00 + 1] * w00 + data[i01 + 1] * w01 + data[i10 + 1] * w10 + data[i11 + 1] * w11);
+      out[p + 2] = clamp255(data[i00 + 2] * w00 + data[i01 + 2] * w01 + data[i10 + 2] * w10 + data[i11 + 2] * w11);
+      out[p + 3] = clamp255(data[i00 + 3] * w00 + data[i01 + 3] * w01 + data[i10 + 3] * w10 + data[i11 + 3] * w11);
+      sxNum += h0;
+      syNum += h3;
+      den += h6;
     }
   }
+  return out;
 }
 
 /// deskew 旋转：绕中心旋转 angle 弧度，并裁掉旋转后露白边（内接矩形保守裁剪）
@@ -342,62 +231,105 @@ PixelImage deskewRotate(
   int channels,
   double angle,
 ) {
-  final spec = _prepareDeskew(w, h, channels, angle);
-  if (spec == null) {
+  if (angle.abs() < 0.0009 || w < 8 || h < 8 || channels < 1) {
     return PixelImage(data: src, width: w, height: h, channels: channels);
   }
-  final out = Uint8List(spec.nw * spec.nh * channels);
-  for (var y = 0; y < spec.nh; y++) {
-    _deskewRotateRow(src, out, w, h, spec.nw, spec.nh, channels, spec.sin, spec.cos, y);
-  }
-  return PixelImage(data: out, width: spec.nw, height: spec.nh, channels: channels);
-}
-
-Future<PixelImage> deskewRotateAsync(
-  Uint8List src,
-  int w,
-  int h,
-  int channels,
-  double angle, {
-  required Future<void> Function() maybeYield,
-}) async {
-  final spec = _prepareDeskew(w, h, channels, angle);
-  if (spec == null) {
+  final sin = math.sin(angle);
+  final cos = math.cos(angle);
+  final absSin = sin.abs();
+  final insetX = ((h / 2.0) * absSin).ceil() + 1;
+  final insetY = ((w / 2.0) * absSin).ceil() + 1;
+  final nw = w - 2 * insetX;
+  final nh = h - 2 * insetY;
+  if (nw < w * 0.5 || nh < h * 0.5) {
     return PixelImage(data: src, width: w, height: h, channels: channels);
   }
-  final out = Uint8List(spec.nw * spec.nh * channels);
-  for (var y = 0; y < spec.nh; y++) {
-    _deskewRotateRow(src, out, w, h, spec.nw, spec.nh, channels, spec.sin, spec.cos, y);
-    if ((y & 31) == 31) {
-      await maybeYield();
+  final out = Uint8List(nw * nh * channels);
+  final ccx = w / 2.0;
+  final ccy = h / 2.0;
+  final ocx = nw / 2.0;
+  final ocy = nh / 2.0;
+  final maxX = w - 1;
+  final maxY = h - 1;
+  for (var y = 0; y < nh; y++) {
+    final dy = y + 0.5 - ocy;
+    var p = y * nw * channels;
+    for (var x = 0; x < nw; x++, p += channels) {
+      final dx = x + 0.5 - ocx;
+      var fx = ccx + dx * cos + dy * sin - 0.5;
+      var fy = ccy - dx * sin + dy * cos - 0.5;
+      fx = fx < 0 ? 0.0 : (fx > maxX ? maxX.toDouble() : fx);
+      fy = fy < 0 ? 0.0 : (fy > maxY ? maxY.toDouble() : fy);
+      final x0 = fx.toInt();
+      final y0 = fy.toInt();
+      final ax = fx - x0;
+      final ay = fy - y0;
+      final x1 = x0 < maxX ? x0 + 1 : x0;
+      final y1 = y0 < maxY ? y0 + 1 : y0;
+      final i00 = (y0 * w + x0) * channels;
+      final i01 = (y0 * w + x1) * channels;
+      final i10 = (y1 * w + x0) * channels;
+      final i11 = (y1 * w + x1) * channels;
+      final w00 = (1.0 - ax) * (1.0 - ay);
+      final w01 = ax * (1.0 - ay);
+      final w10 = (1.0 - ax) * ay;
+      final w11 = ax * ay;
+      for (var c = 0; c < channels; c++) {
+        out[p + c] = clamp255(
+          src[i00 + c] * w00 + src[i01 + c] * w01 + src[i10 + c] * w10 + src[i11 + c] * w11,
+        );
+      }
     }
   }
-  return PixelImage(data: out, width: spec.nw, height: spec.nh, channels: channels);
+  return PixelImage(data: out, width: nw, height: nh, channels: channels);
 }
 
-class _SkewProjection {
-  _SkewProjection({
-    required this.xs,
-    required this.ys,
-    required this.cnt,
-    required this.sw,
-    required this.sh,
-  })  : cx = sw / 2.0,
-        cy = sh / 2.0,
-        histSize = sw + sh + 8,
-        offset = ((sw + sh) >> 1) + 4,
-        rowHist = Int32List(sw + sh + 8);
+/// 倾斜角检测：将暗像素投影到行方向，找使行投影方差最大的旋转角（弧度）
+double detectSkewAngle(Uint8List gray, int w, int h) {
+  final long = math.max(w, h);
+  if (long < 80) return 0.0;
+  final factor = math.max(1, (long / 900.0).round());
+  Float32List blurred;
+  int sw;
+  int sh;
+  if (factor > 1) {
+    final d = downsampleGrid(gray, w, h, factor);
+    sw = d.width;
+    sh = d.height;
+    blurred = boxBlurFloat(d.data, sw, sh, 1, 1);
+  } else {
+    sw = w;
+    sh = h;
+    blurred = Float32List(w * h);
+    for (var i = 0; i < w * h; i++) {
+      blurred[i] = gray[i].toDouble();
+    }
+  }
 
-  final Float32List xs;
-  final Float32List ys;
-  final int cnt;
-  final int sw;
-  final int sh;
-  final double cx;
-  final double cy;
-  final int histSize;
-  final int offset;
-  final Int32List rowHist;
+  final hist = Uint32List(256);
+  for (var i = 0; i < sw * sh; i++) {
+    final v = blurred[i];
+    hist[v <= 0 ? 0 : (v >= 255 ? 255 : v.toInt())]++;
+  }
+  final thr = otsuThreshold(hist);
+  final total = sw * sh;
+  final xs = Float32List(total);
+  final ys = Float32List(total);
+  var cnt = 0;
+  for (var i = 0; i < total; i++) {
+    if (blurred[i] <= thr) {
+      xs[cnt] = (i % sw).toDouble();
+      ys[cnt] = (i ~/ sw).toDouble();
+      cnt++;
+    }
+  }
+  if (cnt < 200 || cnt > (total * 0.85).round()) return 0.0;
+
+  final cx = sw / 2.0;
+  final cy = sh / 2.0;
+  final histSize = sw + sh + 8;
+  final offset = ((sw + sh) >> 1) + 4;
+  final rowHist = Int32List(histSize);
 
   double varianceAt(double theta, int step) {
     final sin = math.sin(theta);
@@ -429,156 +361,35 @@ class _SkewProjection {
     final mean = sum / count;
     return sumSq / count - mean * mean;
   }
-}
 
-_SkewProjection? _buildSkewProjection(Float32List blurred, int sw, int sh) {
-  final total = sw * sh;
-  final hist = Uint32List(256);
-  for (var i = 0; i < total; i++) {
-    final v = blurred[i];
-    hist[v <= 0 ? 0 : (v >= 255 ? 255 : v.toInt())]++;
-  }
-  final thr = otsuThreshold(hist);
-  final xs = Float32List(total);
-  final ys = Float32List(total);
-  var cnt = 0;
-  for (var i = 0; i < total; i++) {
-    if (blurred[i] <= thr) {
-      xs[cnt] = (i % sw).toDouble();
-      ys[cnt] = (i ~/ sw).toDouble();
-      cnt++;
+  final coarseStep = math.max(1, (cnt / 40000.0).ceil());
+  var bestDeg = 0.0;
+  var bestVar = -1.0;
+  for (var deg = -15; deg <= 15; deg++) {
+    final v = varianceAt(deg * _degToRad, coarseStep);
+    if (v > bestVar) {
+      bestVar = v;
+      bestDeg = deg.toDouble();
     }
   }
-  if (cnt < 200 || cnt > (total * 0.85).round()) return null;
-  return _SkewProjection(xs: xs, ys: ys, cnt: cnt, sw: sw, sh: sh);
-}
+  if (bestVar < 0 || bestDeg.abs() < 0.2) return 0.0;
 
-Float32List _grayToFloat32(Uint8List gray) {
-  final out = Float32List(gray.length);
-  for (var i = 0; i < gray.length; i++) {
-    out[i] = gray[i].toDouble();
+  final fineStep = math.max(1, (cnt / 200000.0).ceil());
+  var refined = bestDeg;
+  for (var pass = 0; pass < 2; pass++) {
+    final span = pass == 0 ? 1.0 : 0.2;
+    final stepDeg = pass == 0 ? 0.2 : 0.05;
+    var localBest = refined;
+    var localVar = -1.0;
+    for (var deg = refined - span; deg <= refined + span + 1e-9; deg += stepDeg) {
+      final v = varianceAt(deg * _degToRad, fineStep);
+      if (v > localVar) {
+        localVar = v;
+        localBest = deg;
+      }
+    }
+    refined = localBest;
   }
-  return out;
-}
-
-double _finalizeSkewDeg(double refined) {
   if (refined.abs() < 0.15 || refined.abs() > 15.0) return 0.0;
   return refined * _degToRad;
-}
-
-/// 倾斜角检测：将暗像素投影到行方向，找使行投影方差最大的旋转角（弧度）
-double detectSkewAngle(Uint8List gray, int w, int h) {
-  final long = math.max(w, h);
-  if (long < 80) return 0.0;
-  final factor = math.max(1, (long / 900.0).round());
-  final Float32List blurred;
-  final int sw;
-  final int sh;
-  if (factor > 1) {
-    final d = downsampleGrid(gray, w, h, factor);
-    sw = d.width;
-    sh = d.height;
-    blurred = boxBlurFloat(d.data, sw, sh, 1, 1);
-  } else {
-    sw = w;
-    sh = h;
-    blurred = _grayToFloat32(gray);
-  }
-
-  final proj = _buildSkewProjection(blurred, sw, sh);
-  if (proj == null) return 0.0;
-
-  final coarseStep = math.max(1, (proj.cnt / 40000.0).ceil());
-  var bestDeg = 0.0;
-  var bestVar = -1.0;
-  for (var deg = -15; deg <= 15; deg++) {
-    final v = proj.varianceAt(deg * _degToRad, coarseStep);
-    if (v > bestVar) {
-      bestVar = v;
-      bestDeg = deg.toDouble();
-    }
-  }
-  if (bestVar < 0 || bestDeg.abs() < 0.2) return 0.0;
-
-  final fineStep = math.max(1, (proj.cnt / 200000.0).ceil());
-  var refined = bestDeg;
-  for (var pass = 0; pass < 2; pass++) {
-    final span = pass == 0 ? 1.0 : 0.2;
-    final stepDeg = pass == 0 ? 0.2 : 0.05;
-    var localBest = refined;
-    var localVar = -1.0;
-    for (var deg = refined - span; deg <= refined + span + 1e-9; deg += stepDeg) {
-      final v = proj.varianceAt(deg * _degToRad, fineStep);
-      if (v > localVar) {
-        localVar = v;
-        localBest = deg;
-      }
-    }
-    refined = localBest;
-  }
-  return _finalizeSkewDeg(refined);
-}
-
-Future<double> detectSkewAngleAsync(
-  Uint8List gray,
-  int w,
-  int h, {
-  required Future<void> Function() maybeYield,
-}) async {
-  final long = math.max(w, h);
-  if (long < 80) return 0.0;
-  final factor = math.max(1, (long / 900.0).round());
-  final Float32List blurred;
-  final int sw;
-  final int sh;
-  if (factor > 1) {
-    final d = await downsampleGridAsync(gray, w, h, factor, maybeYield: maybeYield);
-    sw = d.width;
-    sh = d.height;
-    await maybeYield();
-    blurred = boxBlurFloat(d.data, sw, sh, 1, 1);
-  } else {
-    sw = w;
-    sh = h;
-    blurred = _grayToFloat32(gray);
-  }
-  await maybeYield();
-
-  final proj = _buildSkewProjection(blurred, sw, sh);
-  if (proj == null) return 0.0;
-  await maybeYield();
-
-  final coarseStep = math.max(1, (proj.cnt / 40000.0).ceil());
-  var bestDeg = 0.0;
-  var bestVar = -1.0;
-  for (var deg = -15; deg <= 15; deg++) {
-    final v = proj.varianceAt(deg * _degToRad, coarseStep);
-    if (v > bestVar) {
-      bestVar = v;
-      bestDeg = deg.toDouble();
-    }
-    if ((deg & 3) == 3) {
-      await maybeYield();
-    }
-  }
-  if (bestVar < 0 || bestDeg.abs() < 0.2) return 0.0;
-
-  final fineStep = math.max(1, (proj.cnt / 200000.0).ceil());
-  var refined = bestDeg;
-  for (var pass = 0; pass < 2; pass++) {
-    final span = pass == 0 ? 1.0 : 0.2;
-    final stepDeg = pass == 0 ? 0.2 : 0.05;
-    var localBest = refined;
-    var localVar = -1.0;
-    for (var deg = refined - span; deg <= refined + span + 1e-9; deg += stepDeg) {
-      final v = proj.varianceAt(deg * _degToRad, fineStep);
-      if (v > localVar) {
-        localVar = v;
-        localBest = deg;
-      }
-      await maybeYield();
-    }
-    refined = localBest;
-  }
-  return _finalizeSkewDeg(refined);
 }

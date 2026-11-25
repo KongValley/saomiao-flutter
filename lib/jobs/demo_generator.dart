@@ -5,17 +5,9 @@ import 'package:image/image.dart' as img;
 
 import '../io/image_acquisition.dart';
 
-/// 在后台 Isolate 生成模拟拍摄的文档照片（Web 端协作让出帧避免主线程卡死）
-Future<List<PickedImageInput>> generateDemoDocuments([int count = 2]) async {
+/// 在后台 Isolate 生成模拟拍摄的文档照片
+Future<List<PickedImageInput>> generateDemoDocuments([int count = 2]) {
   final n = count.clamp(1, 6);
-  if (kIsWeb) {
-    final out = <PickedImageInput>[];
-    for (var i = 0; i < n; i++) {
-      final bytes = await _renderSingleDemoJpegAsync(i);
-      out.add(PickedImageInput(name: '示例文档_${i + 1}.jpg', bytes: bytes));
-    }
-    return out;
-  }
   return compute(_generateDemoSync, n);
 }
 
@@ -115,21 +107,5 @@ Uint8List _renderSingleDemoJpeg(int index) {
   for (var y = 0; y < height; y++) {
     _renderDemoRow(im, index, y, width, height);
   }
-  return img.encodeJpg(im, quality: 90);
-}
-
-Future<Uint8List> _renderSingleDemoJpegAsync(int index) async {
-  const width = 900;
-  const height = 1200;
-  final im = img.Image(width: width, height: height, numChannels: 3);
-  final sw = Stopwatch()..start();
-  for (var y = 0; y < height; y++) {
-    _renderDemoRow(im, index, y, width, height);
-    if ((y & 31) == 31 && sw.elapsedMilliseconds >= 12) {
-      await Future<void>.delayed(Duration.zero);
-      sw.reset();
-    }
-  }
-  await Future<void>.delayed(Duration.zero);
   return img.encodeJpg(im, quality: 90);
 }

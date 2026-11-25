@@ -146,15 +146,6 @@ void main(List<String> args) {
 </adaptive-icon>
 ''');
 
-  // Web icons
-  File(p.join(root, 'web', 'favicon.png')).writeAsBytesSync(img.encodePng(resizeSq(masterIcon, 48)));
-  File(p.join(root, 'web', 'icons', 'Icon-192.png')).writeAsBytesSync(img.encodePng(resizeSq(masterIcon, 192)));
-  File(p.join(root, 'web', 'icons', 'Icon-512.png')).writeAsBytesSync(img.encodePng(resizeSq(masterIcon, 512)));
-  File(p.join(root, 'web', 'icons', 'Icon-maskable-192.png'))
-      .writeAsBytesSync(img.encodePng(resizeSq(masterIcon, 192)));
-  File(p.join(root, 'web', 'icons', 'Icon-maskable-512.png'))
-      .writeAsBytesSync(img.encodePng(resizeSq(masterIcon, 512)));
-
   // Windows ICO (multi-size 16/32/48/256)
   final icoImg = resizeSq(masterIcon, 256);
   for (final s in [128, 64, 48, 32, 16]) {

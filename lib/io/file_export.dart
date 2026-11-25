@@ -1,5 +1,6 @@
+import 'dart:typed_data';
+
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'app_storage.dart';
@@ -48,16 +49,13 @@ class FileExporter {
               mimeType: mimeType,
               dialogTitle: '保存扫描件',
             );
-      if (kIsWeb) {
-        return savedUri != null ? '已保存：$fileName' : '已开始下载：$fileName';
-      }
       if (savedUri == null) {
         return '';
       }
       return '已保存到：$fileName';
     }
 
-    // 分享：原生平台写入临时文件再分享；Web 直接使用内存字节
+    // 写入临时文件供系统分享；若未生成临时路径则回退为内存字节
     final tempPath = await storage.writeExportTempFile(bytes, fileName);
     final xfile = tempPath != null
         ? XFile(tempPath, mimeType: mimeType, name: fileName)
@@ -72,9 +70,6 @@ class FileExporter {
 
     if (result.status == ShareResultStatus.dismissed) {
       return '';
-    }
-    if (kIsWeb) {
-      return '已导出：$fileName';
     }
     return result.status == ShareResultStatus.success ? '已分享：$fileName' : '已打开系统分享';
   }

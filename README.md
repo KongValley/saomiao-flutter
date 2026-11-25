@@ -1,6 +1,6 @@
 # 扫描件工坊 · Flutter 跨平台版
 
-把文档照片在**设备本地**处理为平整、干净的扫描件，并导出多页 PDF。全程不联网、不上传、无需服务器，支持 **Android / iOS / Windows 桌面 / Web**。
+把文档照片在**设备本地**处理为平整、干净的扫描件，并导出多页 PDF。全程不联网、不上传、无需服务器，支持 **Android / iOS / Windows 桌面**。
 
 本工程基于原 Expo 版（`F:\workspace\saomiao-expo`）使用 Flutter 技术栈重新打造：
 - **核心算法与零依赖 PDF 生成器 100% 保持一致**（透视矫正、背景除法去阴影、Sauvola 二值化、自动四角检测、`/DCTDecode` 多页 PDF）。
@@ -24,11 +24,11 @@ lib/
 │   └── pdf.dart                      # 自写 PDF 1.4 生成器（JPEG /DCTDecode + UTF-16BE 中文标题）
 ├── io/                               # 跨平台像素编解码、持久化、选图与导出
 │   ├── pixel_io.dart                 # package:image 解码/EXIF 摆正/编码 + Flutter 编解码兜底（HEIC 等）
-│   ├── app_storage*.dart             # 条件导入：IO 落盘（pages.json + orig/ + render 缓存）vs Web 内存态
+│   ├── app_storage*.dart             # 持久化存储（pages.json + orig/ + 渲染缓存）
 │   ├── image_acquisition.dart        # 拍照 / 多选图片（桌面端无相机时自动适配）
-│   └── file_export.dart              # share_plus 系统分享 + file_picker 保存到本地文件/下载
+│   └── file_export.dart              # share_plus 系统分享 + file_picker 保存到本地文件
 ├── jobs/
-│   ├── render_jobs.dart              # compute() 后台渲染、FNV-1a 指纹缓存（LRU 保留 30 项）
+│   ├── render_jobs.dart              # compute() 后台渲染、SHA-256 指纹缓存（LRU 保留 30 项）
 │   └── demo_generator.dart           # 内置示例文档生成器（便于无相机环境快速体验）
 ├── state/
 │   ├── page_models.dart              # PageItem、PagesState 状态机、预设与参数元信息
@@ -55,9 +55,6 @@ flutter build apk --release
 
 # 构建 Windows 桌面端（Release）
 flutter build windows --release
-
-# 构建 Web 产物（Release）
-flutter build web --release
 ```
 
 ---
@@ -65,7 +62,7 @@ flutter build web --release
 ## 与原 Expo 版的主要改进
 
 1. **后台线程渲染**：利用 Dart `compute()` 在独立 Isolate 执行重计算，消除单线程卡顿。
-2. **完整全平台适配**：同一套代码库支持 Android、iOS、Windows 桌面和 Web 浏览器（条件导入隔离 `dart:io`）。
+2. **原生全平台适配**：同一套代码库支持 Android、iOS 与 Windows 桌面端。
 3. **Material 3 自适应交互**：
    - 宽屏（`>= 840dp`）自动切换为「左侧画布 + 右侧参数检验栏」双栏工作区；
    - 缩略图支持真正的长按拖放排序（`ReorderableListView`）；

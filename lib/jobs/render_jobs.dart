@@ -399,49 +399,6 @@ class RenderJobs {
     final sourceBytes = await storage.readSourceBytes(page.sourceUri);
     checkAbort();
 
-    if (kIsWeb) {
-      final sw = Stopwatch()..start();
-      Future<void> maybeYield() async {
-        checkAbort();
-        if (sw.elapsedMilliseconds >= 12) {
-          await Future<void>.delayed(Duration.zero);
-          sw.reset();
-          checkAbort();
-        }
-      }
-
-      await Future<void>.delayed(Duration.zero);
-      checkAbort();
-      final decoded = await decodeImageBytes(sourceBytes, maxPixels: kMaxSourcePixels);
-      checkAbort();
-      onStage?.call('处理');
-      await Future<void>.delayed(Duration.zero);
-      checkAbort();
-      final rendered = await renderPageCooperative(
-        decoded,
-        effective,
-        maybeYield: maybeYield,
-      );
-      checkAbort();
-      final outBytes = encodePixels(
-        data: rendered.data,
-        width: rendered.width,
-        height: rendered.height,
-        channels: rendered.channels,
-        mime: mime,
-        quality: quality,
-      );
-      checkAbort();
-      final thumbBytes = _encodeThumb(rendered);
-      return RenderedPageResult(
-        bytes: outBytes,
-        thumbBytes: thumbBytes,
-        width: rendered.width,
-        height: rendered.height,
-        format: mime == 'image/png' ? 'png' : 'jpeg',
-      );
-    }
-
     onStage?.call('处理');
     var response = await compute(
       _renderWorker,
@@ -486,21 +443,6 @@ class RenderJobs {
 
   Future<DetectCornersResult> detectCornersTask(PageItem page) async {
     final sourceBytes = await storage.readSourceBytes(page.sourceUri);
-    if (kIsWeb) {
-      await Future<void>.delayed(Duration.zero);
-      final probed = probeSizeSync(sourceBytes);
-      final decoded = await decodeImageBytes(sourceBytes, maxPixels: 1200 * 1200);
-      await Future<void>.delayed(Duration.zero);
-      final small = downscaleMaxEdge(decoded, 1200);
-      final detected = detectCorners(small);
-      return DetectCornersResult(
-        corners: detected.corners,
-        width: probed?.width ?? decoded.width,
-        height: probed?.height ?? decoded.height,
-        confidence: detected.confidence,
-      );
-    }
-
     var response = await compute(
       _detectWorker,
       _WorkerDetectRequest(sourceBytes: sourceBytes),
@@ -577,11 +519,6 @@ class RenderJobs {
         throw StateError('第 ${i + 1} 页「${page.name}」导出失败：$detail');
       }
       onProgress?.call(i + 1, pages.length);
-    }
-    if (kIsWeb) {
-      await Future<void>.delayed(Duration.zero);
-      final pdfBytes = buildPdf(inputs, pdfOptions);
-      return ExportPdfOutcome(bytes: pdfBytes, pageCount: pages.length);
     }
     final pdfBytes = await compute(
       _buildPdfWorker,

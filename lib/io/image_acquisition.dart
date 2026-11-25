@@ -130,7 +130,7 @@ class ImageAcquisition {
   }
 
   Future<List<PickedImageEntry>> retrieveLostEntries() async {
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+    if (defaultTargetPlatform != TargetPlatform.android) {
       return const <PickedImageEntry>[];
     }
     try {
