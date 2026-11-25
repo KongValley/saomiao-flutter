@@ -11,35 +11,48 @@ Future<RgbaSource?> rasterizeWatermarkTile(String? rawText) async {
   final text = rawText?.trim() ?? '';
   if (text.isEmpty) return null;
 
-  const size = 360;
-  final recorder = ui.PictureRecorder();
-  final canvas = Canvas(
-    recorder,
-    Rect.fromLTWH(0, 0, size.toDouble(), size.toDouble()),
-  );
-
+  final fontSize = text.length > 22
+      ? 18.0
+      : (text.length > 14 ? 20.0 : 22.0);
   final paragraphBuilder = ui.ParagraphBuilder(
     ui.ParagraphStyle(
       textAlign: TextAlign.center,
-      maxLines: 2,
+      maxLines: 1,
       ellipsis: '…',
     ),
   )
     ..pushStyle(
       ui.TextStyle(
         color: const Color(0xFF1E293B),
-        fontSize: text.length > 14 ? 20.0 : 24.0,
+        fontSize: fontSize,
         fontWeight: ui.FontWeight.w600,
       ),
     )
     ..addText(text);
 
   final paragraph = paragraphBuilder.build()
-    ..layout(const ui.ParagraphConstraints(width: 310));
+    ..layout(const ui.ParagraphConstraints(width: double.infinity));
+
+  final lineW = paragraph.maxIntrinsicWidth.clamp(120.0, 520.0);
+  paragraph.layout(ui.ParagraphConstraints(width: lineW + 8));
+
+  const angle = -math.pi / 6.0;
+  final cosA = math.cos(angle).abs();
+  final sinA = math.sin(angle).abs();
+  final rotW = lineW * cosA + paragraph.height * sinA;
+  final rotH = lineW * sinA + paragraph.height * cosA;
+  final tileW = (rotW + 64).ceil().clamp(320, 600);
+  final tileH = (rotH + 72).ceil().clamp(260, 480);
+
+  final recorder = ui.PictureRecorder();
+  final canvas = Canvas(
+    recorder,
+    Rect.fromLTWH(0, 0, tileW.toDouble(), tileH.toDouble()),
+  );
 
   canvas.save();
-  canvas.translate(size / 2.0, size / 2.0);
-  canvas.rotate(-math.pi / 6.0);
+  canvas.translate(tileW / 2.0, tileH / 2.0);
+  canvas.rotate(angle);
   canvas.drawParagraph(
     paragraph,
     Offset(-paragraph.width / 2.0, -paragraph.height / 2.0),
@@ -47,14 +60,14 @@ Future<RgbaSource?> rasterizeWatermarkTile(String? rawText) async {
   canvas.restore();
 
   final picture = recorder.endRecording();
-  final image = await picture.toImage(size, size);
+  final image = await picture.toImage(tileW, tileH);
   try {
     final byteData = await image.toByteData(format: ui.ImageByteFormat.rawStraightRgba);
     if (byteData == null) return null;
     final bytes = Uint8List.fromList(
       byteData.buffer.asUint8List(byteData.offsetInBytes, byteData.lengthInBytes),
     );
-    return RgbaSource(data: bytes, width: size, height: size);
+    return RgbaSource(data: bytes, width: tileW, height: tileH);
   } finally {
     image.dispose();
     picture.dispose();

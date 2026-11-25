@@ -213,7 +213,7 @@ class TopBar extends StatelessWidget {
                     ),
                   ],
                 ],
-                if (!compact) ...[
+                if (!compact && (!hasPages || maxW >= 560)) ...[
                   const SizedBox(width: 4),
                   Tooltip(
                     message: '全部处理都在设备本地完成，图片不上传',

@@ -1,7 +1,7 @@
 import 'dart:math' as math;
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../engine/options.dart';
 import '../../state/page_models.dart';
@@ -228,8 +228,10 @@ class _AnnotateOverlayState extends State<AnnotateOverlay> {
     final topPad = MediaQuery.paddingOf(context).top;
     final bottomPad = MediaQuery.paddingOf(context).bottom;
 
-    return Scaffold(
-      backgroundColor: AppColors.darkStage,
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: SystemUiOverlayStyle.light,
+      child: Scaffold(
+        backgroundColor: AppColors.darkStage,
       body: Column(
         children: [
           Container(
@@ -435,29 +437,48 @@ class _AnnotateOverlayState extends State<AnnotateOverlay> {
                   child: Row(
                     children: [
                       for (final mode in _ToolMode.values) ...[
-                        ChoiceChip(
-                          avatar: Icon(
-                            mode.icon,
-                            size: 16,
-                            color: _tool == mode ? Colors.white : Colors.white70,
-                          ),
-                          label: Text(
-                            mode.label,
-                            style: TextStyle(
-                              color: _tool == mode ? Colors.white : Colors.white70,
-                              fontSize: 13,
+                        Material(
+                          color: _tool == mode ? AppColors.seed : const Color(0xFF1E293B),
+                          borderRadius: BorderRadius.circular(10),
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(10),
+                            onTap: () {
+                              setState(() => _tool = mode);
+                              if (mode == _ToolMode.signature) {
+                                _pickOrCreateSignature();
+                              }
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: _tool == mode
+                                      ? AppColors.seed
+                                      : Colors.white.withValues(alpha: 0.18),
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    mode.icon,
+                                    size: 16,
+                                    color: _tool == mode ? Colors.white : Colors.white70,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    mode.label,
+                                    style: TextStyle(
+                                      color: _tool == mode ? Colors.white : Colors.white70,
+                                      fontSize: 13,
+                                      fontWeight: _tool == mode ? FontWeight.w600 : FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
-                          selected: _tool == mode,
-                          selectedColor: AppColors.seed,
-                          backgroundColor: Colors.white.withValues(alpha: 0.08),
-                          side: BorderSide(color: Colors.white.withValues(alpha: 0.14)),
-                          onSelected: (_) {
-                            setState(() => _tool = mode);
-                            if (mode == _ToolMode.signature) {
-                              _pickOrCreateSignature();
-                            }
-                          },
                         ),
                         const SizedBox(width: 8),
                       ],
@@ -469,6 +490,7 @@ class _AnnotateOverlayState extends State<AnnotateOverlay> {
           ),
         ],
       ),
+    ),
     );
   }
 

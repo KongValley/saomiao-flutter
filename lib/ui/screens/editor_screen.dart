@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:flutter/foundation.dart' show TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -444,101 +445,100 @@ class _EditorScreenState extends State<EditorScreen> with WidgetsBindingObserver
       constraints: const BoxConstraints(maxWidth: 560),
       builder: (sheetContext) {
         final pal = AppColors.of(sheetContext);
-        return ListenableBuilder(
-          listenable: widget.controller,
-          builder: (context, _) {
-            final page = widget.controller.currentPage;
-            if (page == null) return const SizedBox.shrink();
-            final maxH = MediaQuery.sizeOf(context).height * (tab == _InspectorTab.export ? 0.88 : 0.80);
-            return ConstrainedBox(
-              constraints: BoxConstraints(maxHeight: maxH),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 0, 12, 10),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                meta.$1,
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.w700,
-                                  color: pal.ink,
+        return SafeArea(
+          top: false,
+          child: ListenableBuilder(
+            listenable: widget.controller,
+            builder: (context, _) {
+              final page = widget.controller.currentPage;
+              if (page == null) return const SizedBox.shrink();
+              final maxH =
+                  MediaQuery.sizeOf(context).height * (tab == _InspectorTab.export ? 0.85 : 0.78);
+              return ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: maxH),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 0, 12, 10),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  meta.$1,
+                                  style: TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w700,
+                                    color: pal.ink,
+                                  ),
                                 ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  meta.$2,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: pal.inkMuted,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: '关闭',
+                            onPressed: () => Navigator.of(sheetContext).pop(),
+                            icon: const Icon(Icons.close_rounded),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (widget.controller.isBusy)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: pal.accentBg,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Row(
+                            children: [
+                              const SizedBox(
+                                width: 15,
+                                height: 15,
+                                child: CircularProgressIndicator(strokeWidth: 2),
                               ),
-                              const SizedBox(height: 2),
-                              Text(
-                                meta.$2,
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: pal.inkMuted,
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  widget.controller.busyLabel,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: pal.accentText,
+                                  ),
                                 ),
                               ),
                             ],
                           ),
                         ),
-                        IconButton(
-                          tooltip: '关闭',
-                          onPressed: () => Navigator.of(sheetContext).pop(),
-                          icon: const Icon(Icons.close_rounded),
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (widget.controller.isBusy)
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: pal.accentBg,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Row(
-                          children: [
-                            const SizedBox(
-                              width: 15,
-                              height: 15,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                widget.controller.busyLabel,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
-                                  color: pal.accentText,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
+                      ),
+                    Flexible(
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
+                        child: _buildInspectorBody(tab, page),
                       ),
                     ),
-                  Flexible(
-                    child: SingleChildScrollView(
-                      padding: EdgeInsets.fromLTRB(
-                        20,
-                        4,
-                        20,
-                        20 + MediaQuery.paddingOf(context).bottom,
-                      ),
-                      child: _buildInspectorBody(tab, page),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          },
+                  ],
+                ),
+              );
+            },
+          ),
         );
       },
     );
@@ -617,14 +617,20 @@ class _EditorScreenState extends State<EditorScreen> with WidgetsBindingObserver
     setState(() => _modalDepth++);
     await showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
       constraints: const BoxConstraints(maxWidth: 480),
       builder: (sheetCtx) {
         final pal = AppColors.of(sheetCtx);
+        final maxH = MediaQuery.sizeOf(sheetCtx).height * 0.85;
         return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-            child: SingleChildScrollView(
-              child: Column(
+          top: false,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: maxH),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: SingleChildScrollView(
+                child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -733,6 +739,7 @@ class _EditorScreenState extends State<EditorScreen> with WidgetsBindingObserver
               ),
             ),
           ),
+        ),
         );
       },
     );
@@ -781,7 +788,10 @@ class _EditorScreenState extends State<EditorScreen> with WidgetsBindingObserver
               ),
               const SizedBox(height: 10),
               Text(
-                '拍照、拖拽图片或导入 PDF，自动校正四角、去阴影、留红印章，生成双层可搜索 PDF。全部本地完成，不上传。',
+                defaultTargetPlatform == TargetPlatform.android ||
+                        defaultTargetPlatform == TargetPlatform.iOS
+                    ? '拍照、从相册选图或导入 PDF，自动校正四角、去阴影、留红印章，生成双层可搜索 PDF。全部本地完成，不上传。'
+                    : '拍照、拖拽图片或导入 PDF，自动校正四角、去阴影、留红印章，生成双层可搜索 PDF。全部本地完成，不上传。',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 14,
@@ -973,8 +983,8 @@ class _EditorScreenState extends State<EditorScreen> with WidgetsBindingObserver
                         crossAxisAlignment: WrapCrossAlignment.center,
                         children: [
                           Container(
-                            height: narrow ? 28 : 32,
-                            padding: EdgeInsets.symmetric(horizontal: narrow ? 9 : 12),
+                            height: narrow ? 28 : 30,
+                            padding: EdgeInsets.symmetric(horizontal: narrow ? 8 : 10),
                             decoration: BoxDecoration(
                               color: AppColors.ink.withValues(alpha: 0.78),
                               borderRadius: BorderRadius.circular(999),
@@ -988,7 +998,7 @@ class _EditorScreenState extends State<EditorScreen> with WidgetsBindingObserver
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
-                                      fontSize: narrow ? 12 : 13,
+                                      fontSize: narrow ? 11.5 : 12.5,
                                       fontWeight: FontWeight.w600,
                                       color: Colors.white,
                                     ),
@@ -999,7 +1009,7 @@ class _EditorScreenState extends State<EditorScreen> with WidgetsBindingObserver
                           ),
                           if (showOriginal)
                             Container(
-                              height: narrow ? 28 : 32,
+                              height: narrow ? 28 : 30,
                               padding: const EdgeInsets.symmetric(horizontal: 10),
                               decoration: BoxDecoration(
                                 color: AppColors.warn,
@@ -1022,34 +1032,40 @@ class _EditorScreenState extends State<EditorScreen> with WidgetsBindingObserver
                               ),
                             )
                           else if (page.options.corners != null)
-                            Container(
-                              height: narrow ? 28 : 32,
-                              padding: EdgeInsets.symmetric(horizontal: narrow ? 8 : 10),
-                              decoration: BoxDecoration(
-                                color: pal.surface.withValues(alpha: 0.94),
-                                borderRadius: BorderRadius.circular(999),
-                                border: Border.all(color: pal.outline),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    Icons.crop_free_rounded,
-                                    size: 14,
-                                    color: pal.accentText,
-                                  ),
-                                  if (!narrow) ...[
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      '已校正',
-                                      style: TextStyle(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w600,
-                                        color: pal.accentText,
-                                      ),
+                            InkWell(
+                              onTap: widget.controller.isBusy
+                                  ? null
+                                  : () => _openCornersOverlay(page),
+                              borderRadius: BorderRadius.circular(999),
+                              child: Container(
+                                height: narrow ? 28 : 30,
+                                padding: EdgeInsets.symmetric(horizontal: narrow ? 7 : 8),
+                                decoration: BoxDecoration(
+                                  color: pal.surface.withValues(alpha: 0.94),
+                                  borderRadius: BorderRadius.circular(999),
+                                  border: Border.all(color: pal.outline),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.crop_free_rounded,
+                                      size: 13,
+                                      color: pal.accentText,
                                     ),
+                                    if (!narrow) ...[
+                                      const SizedBox(width: 3),
+                                      Text(
+                                        '已校正',
+                                        style: TextStyle(
+                                          fontSize: 11.5,
+                                          fontWeight: FontWeight.w600,
+                                          color: pal.accentText,
+                                        ),
+                                      ),
+                                    ],
                                   ],
-                                ],
+                                ),
                               ),
                             ),
                         ],
@@ -1328,8 +1344,17 @@ class _EditorScreenState extends State<EditorScreen> with WidgetsBindingObserver
         final hasPages = widget.controller.hasPages;
         final page = widget.controller.currentPage;
         final isWide = MediaQuery.sizeOf(context).width >= 840;
+        final isDark = Theme.of(context).brightness == Brightness.dark;
 
-        return Focus(
+        return AnnotatedRegion<SystemUiOverlayStyle>(
+          value: isDark
+              ? SystemUiOverlayStyle.light
+              : const SystemUiOverlayStyle(
+                  statusBarColor: Colors.transparent,
+                  statusBarIconBrightness: Brightness.dark,
+                  statusBarBrightness: Brightness.light,
+                ),
+          child: Focus(
           focusNode: _shortcutFocus,
           autofocus: true,
           onKeyEvent: _handleKeyEvent,
@@ -1492,6 +1517,7 @@ class _EditorScreenState extends State<EditorScreen> with WidgetsBindingObserver
               ],
             ),
           ),
+        ),
         );
       },
     );

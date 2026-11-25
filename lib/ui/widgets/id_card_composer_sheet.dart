@@ -135,7 +135,7 @@ class _IdCardComposerScreenState extends State<IdCardComposerScreen> {
     var opts = baseOptions ??
         ScanOptions(
           mode: _mode,
-          shadow: _mode == ScanMode.color ? 32 : 58,
+          shadow: _mode == ScanMode.color ? 12 : 58,
           contrast: 54,
         );
     // 自动检测卡证四角
@@ -300,6 +300,7 @@ class _IdCardComposerScreenState extends State<IdCardComposerScreen> {
           Text(_template.desc, style: TextStyle(fontSize: 12, color: pal.inkMuted)),
           const SizedBox(height: 16),
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
                 child: _buildSlotCard(
@@ -424,7 +425,17 @@ class _IdCardComposerScreenState extends State<IdCardComposerScreen> {
             ),
           ],
           const SizedBox(height: 16),
-          Row(
+        ],
+      ),
+      bottomNavigationBar: SafeArea(
+        top: false,
+        child: Container(
+          decoration: BoxDecoration(
+            color: pal.surface,
+            border: Border(top: BorderSide(color: pal.outline)),
+          ),
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+          child: Row(
             children: [
               Expanded(
                 child: FilledButton.icon(
@@ -456,7 +467,7 @@ class _IdCardComposerScreenState extends State<IdCardComposerScreen> {
               ),
             ],
           ),
-        ],
+        ),
       ),
     );
   }

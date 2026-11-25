@@ -1,7 +1,6 @@
-import 'dart:typed_data';
-
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../io/image_acquisition.dart';
 import '../theme.dart';
@@ -158,8 +157,10 @@ class _BurstCameraScreenState extends State<BurstCameraScreen> with WidgetsBindi
     final bottomPad = MediaQuery.paddingOf(context).bottom;
     final cam = _camController;
 
-    return Scaffold(
-      backgroundColor: Colors.black,
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: SystemUiOverlayStyle.light,
+      child: Scaffold(
+        backgroundColor: Colors.black,
       body: Stack(
         fit: StackFit.expand,
         children: [
@@ -352,6 +353,7 @@ class _BurstCameraScreenState extends State<BurstCameraScreen> with WidgetsBindi
           ),
         ],
       ),
+    ),
     );
   }
 }

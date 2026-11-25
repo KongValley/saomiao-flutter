@@ -182,6 +182,7 @@ class ScannerController extends ChangeNotifier {
   Stream<ToastMessage> get toasts => _toastController.stream;
 
   int _renderSeq = 0;
+  bool _warmupActive = false;
   Timer? _debounceTimer;
   Timer? _persistTimer;
   bool _persistDirty = false;
@@ -404,7 +405,61 @@ class ScannerController extends ChangeNotifier {
         _rendering = false;
         _renderLabel = '正在处理…';
         _notify();
+        _scheduleThumbnailWarmup();
       }
+    }
+  }
+
+  void _scheduleThumbnailWarmup() {
+    if (_disposed || _warmupActive || _exporting || _batchWorking || _rendering) return;
+    final docId = currentDocument.id;
+    final hasMissing = _state.pages.any((p) => !_thumbnails.containsKey(p.id));
+    if (!hasMissing) return;
+    _warmupActive = true;
+    unawaited(_runThumbnailWarmup(docId));
+  }
+
+  Future<void> _runThumbnailWarmup(String docId) async {
+    final attempted = <String>{};
+    try {
+      while (!_disposed &&
+          !_exporting &&
+          !_batchWorking &&
+          !_rendering &&
+          currentDocument.id == docId) {
+        final target = _state.pages
+            .where((p) => !_thumbnails.containsKey(p.id) && !attempted.contains(p.id))
+            .firstOrNull;
+        if (target == null) break;
+        bool paused() =>
+            _disposed ||
+            _exporting ||
+            _batchWorking ||
+            _rendering ||
+            currentDocument.id != docId;
+        try {
+          final result = await _jobs.renderPageTask(
+            target,
+            target.options,
+            signatures: _signatures,
+            shouldAbort: paused,
+          );
+          if (paused()) break;
+          attempted.add(target.id);
+          if (_state.pages.any((p) => p.id == target.id && p.options == target.options)) {
+            _putRenderInMemory(target.id, result);
+            _renderErrors.remove(target.id);
+            _stalePages.remove(target.id);
+            _notify();
+          }
+        } catch (_) {
+          if (paused()) break;
+          attempted.add(target.id);
+        }
+        await Future<void>.delayed(Duration.zero);
+      }
+    } finally {
+      _warmupActive = false;
     }
   }
 
@@ -1439,6 +1494,7 @@ class ScannerController extends ChangeNotifier {
     _state = _state.replaceAll(merged, currentIndex: _state.currentIndex);
     _schedulePersist();
     _notify();
+    _scheduleThumbnailWarmup();
     _emitToast('已合并「${sourceDoc.title}」的 ${cloned.length} 页', ToastKind.success);
   }
 

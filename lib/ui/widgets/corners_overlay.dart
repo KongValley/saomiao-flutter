@@ -1,8 +1,8 @@
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../engine/detect.dart';
 import '../../engine/options.dart';
@@ -161,8 +161,10 @@ class _CornersOverlayState extends State<CornersOverlay> {
     final topPad = MediaQuery.paddingOf(context).top;
     final bottomPad = MediaQuery.paddingOf(context).bottom;
 
-    return Scaffold(
-      backgroundColor: AppColors.darkStage,
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: SystemUiOverlayStyle.light,
+      child: Scaffold(
+        backgroundColor: AppColors.darkStage,
       body: Column(
         children: [
           Container(
@@ -399,6 +401,7 @@ class _CornersOverlayState extends State<CornersOverlay> {
           ),
         ],
       ),
+    ),
     );
   }
 }
