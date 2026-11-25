@@ -132,6 +132,18 @@ void main() {
     final idx = (200 * 300 + 200) * 4;
     expect(warm.data[idx] > warm.data[idx + 2], isTrue);
 
+    final warmColor = renderPage(doc.source, const {'mode': 'color', 'paper': 'warm', 'shadow': 0});
+    expect(warmColor.channels, 4);
+    expect(warmColor.data[idx] > warmColor.data[idx + 2], isTrue);
+
+    // 透明 PNG 区域在黑白/灰度下不应变黑
+    final transparentRgba = Uint8List(40 * 40 * 4);
+    final bwTrans = renderPage(
+      RgbaSource(data: transparentRgba, width: 40, height: 40),
+      const {'mode': 'bw', 'shadow': 0},
+    );
+    expect(bwTrans.data[20 * 40 + 20], 255);
+
     final r90 = renderPage(doc.source, const {'mode': 'gray', 'rotate': 90});
     expect(r90.width, 400);
     expect(r90.height, 300);
@@ -202,5 +214,69 @@ void main() {
     expect((bl.x - x0 / width).abs() < 0.06, isTrue);
     expect(res.confidence > 0.3, isTrue);
     expect(normalizeOptions(null).maxDim, 2400);
+  });
+
+  test('renderPageCooperative 与同步 renderPage 字节一致且支持滤镜阶段让步与取消', () async {
+    const width = 180;
+    const height = 240;
+    final data = Uint8List(width * height * 4);
+    for (var y = 0; y < height; y++) {
+      for (var x = 0; x < width; x++) {
+        // 带 ~4° 倾斜的横条，触发 detectSkewAngle + deskewRotate
+        final shiftedY = (y - x * 0.07).round();
+        final isBar = y > 24 && y < height - 24 && x > 20 && x < width - 20 && (shiftedY % 28).abs() < 8;
+        final v = isBar ? 30 : 235;
+        final p = (y * width + x) * 4;
+        data[p] = v;
+        data[p + 1] = isBar ? 25 : 232;
+        data[p + 2] = isBar ? 40 : 228;
+        data[p + 3] = 255;
+      }
+    }
+    final src = RgbaSource(data: data, width: width, height: height);
+
+    for (final mode in ['bw', 'gray', 'color']) {
+      final opts = <String, Object?>{
+        'mode': mode,
+        'denoise': 75,
+        'shadow': 70,
+        'sharpen': 65,
+        'deskew': true,
+        'paper': 'warm',
+        'invert': true,
+        'rotate': 90,
+        'maxDim': 200,
+      };
+      final syncOut = renderPage(src, opts);
+      var yields = 0;
+      final asyncOut = await renderPageCooperative(
+        src,
+        opts,
+        maybeYield: () async {
+          yields++;
+        },
+      );
+      expect(yields, greaterThan(5));
+      expect(asyncOut.width, syncOut.width);
+      expect(asyncOut.height, syncOut.height);
+      expect(asyncOut.channels, syncOut.channels);
+      expect(asyncOut.format, syncOut.format);
+      expect(asyncOut.data, syncOut.data);
+    }
+
+    var stepsBeforeAbort = 0;
+    await expectLater(
+      () => renderPageCooperative(
+        src,
+        const {'mode': 'color', 'denoise': 70, 'shadow': 70, 'sharpen': 60, 'deskew': true},
+        maybeYield: () async {
+          stepsBeforeAbort++;
+          if (stepsBeforeAbort >= 4) {
+            throw StateError('处理已取消');
+          }
+        },
+      ),
+      throwsA(isA<StateError>().having((e) => e.message, 'message', '处理已取消')),
+    );
   });
 }

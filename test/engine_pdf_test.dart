@@ -96,5 +96,14 @@ void main() {
       () => buildPdf([PdfPageInput(jpegBytes: Uint8List.fromList([0x89, 0x50, 0x4e, 0x47]))]),
       throwsA(isA<StateError>().having((e) => e.message, 'msg', contains('不是 JPEG'))),
     );
+
+    // 极窄自动纸张不产生负边距或越界绘制
+    final skinny = _validateStructure(
+      buildPdf(
+        [PdfPageInput(jpegBytes: _makeJpegStub(4000, 1), width: 4000, height: 1)],
+        const PdfOptions(pageSize: PdfPageSize.auto, marginMm: 10),
+      ),
+    );
+    expect(skinny.contains(' -'), isFalse);
   });
 }

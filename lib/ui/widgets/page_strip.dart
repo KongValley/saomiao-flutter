@@ -1,6 +1,7 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
-import '../../jobs/render_jobs.dart';
 import '../../state/page_models.dart';
 import '../theme.dart';
 
@@ -9,7 +10,7 @@ class PageStrip extends StatelessWidget {
     super.key,
     required this.pages,
     required this.currentIndex,
-    required this.renderOf,
+    required this.thumbnailOf,
     required this.onSelect,
     required this.onOpenActions,
     required this.onReorder,
@@ -18,7 +19,7 @@ class PageStrip extends StatelessWidget {
 
   final List<PageItem> pages;
   final int currentIndex;
-  final RenderedPageResult? Function(String id) renderOf;
+  final Uint8List? Function(String id) thumbnailOf;
   final void Function(int index) onSelect;
   final void Function(PageItem page, int index) onOpenActions;
   final void Function(int oldIndex, int newIndex) onReorder;
@@ -87,7 +88,7 @@ class PageStrip extends StatelessWidget {
         itemBuilder: (context, index) {
           final page = pages[index];
           final selected = index == currentIndex;
-          final rendered = renderOf(page.id);
+          final thumbBytes = thumbnailOf(page.id);
 
           return ReorderableDelayedDragStartListener(
             key: ValueKey(page.id),
@@ -130,9 +131,9 @@ class PageStrip extends StatelessWidget {
                     child: Stack(
                       fit: StackFit.expand,
                       children: [
-                        if (rendered != null)
+                        if (thumbBytes != null)
                           Image.memory(
-                            rendered.bytes,
+                            thumbBytes,
                             fit: BoxFit.cover,
                             cacheWidth: 180,
                             gaplessPlayback: true,

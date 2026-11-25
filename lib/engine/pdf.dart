@@ -285,12 +285,13 @@ Uint8List buildPdf(List<PdfPageInput> pages, [PdfOptions opts = const PdfOptions
     final size = _resolvePageSize(opts.pageSize, opts.orientation, imgW, imgH);
     final pageW = size.width;
     final pageH = size.height;
-    final marginPt = math.min(marginMm * _mmToPt, math.min(pageW, pageH) / 2.0 - 1.0);
-    final availW = math.max(1.0, pageW - marginPt * 2.0);
-    final availH = math.max(1.0, pageH - marginPt * 2.0);
+    final maxMarginPt = math.max(0.0, math.min(pageW, pageH) / 2.0 - 1.0);
+    final marginPt = math.min(marginMm * _mmToPt, maxMarginPt);
+    final availW = (pageW - marginPt * 2.0).clamp(0.01, pageW);
+    final availH = (pageH - marginPt * 2.0).clamp(0.01, pageH);
     final scale = math.min(availW / imgW, availH / imgH);
-    final drawW = imgW * scale;
-    final drawH = imgH * scale;
+    final drawW = math.min(pageW, imgW * scale);
+    final drawH = math.min(pageH, imgH * scale);
     plans.add(
       _PagePlan(
         bytes: bytes,

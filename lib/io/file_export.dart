@@ -9,8 +9,23 @@ enum ExportDestination {
   save,
 }
 
+typedef SaveFileCallback = Future<String?> Function({
+  required String fileName,
+  required Uint8List bytes,
+  required String mimeType,
+  required String dialogTitle,
+});
+
+typedef ShareCallback = Future<ShareResult> Function(ShareParams params);
+
 class FileExporter {
-  const FileExporter();
+  const FileExporter({
+    this._saveFile,
+    this._share,
+  });
+
+  final SaveFileCallback? _saveFile;
+  final ShareCallback? _share;
 
   Future<String> deliver({
     required AppStorage storage,
@@ -20,12 +35,19 @@ class FileExporter {
     required ExportDestination destination,
   }) async {
     if (destination == ExportDestination.save) {
-      final savedUri = await FilePicker.saveFile(
-        fileName: fileName,
-        bytes: bytes,
-        mimeType: mimeType,
-        dialogTitle: '保存扫描件',
-      );
+      final savedUri = _saveFile != null
+          ? await _saveFile(
+              fileName: fileName,
+              bytes: bytes,
+              mimeType: mimeType,
+              dialogTitle: '保存扫描件',
+            )
+          : await FilePicker.saveFile(
+              fileName: fileName,
+              bytes: bytes,
+              mimeType: mimeType,
+              dialogTitle: '保存扫描件',
+            );
       if (kIsWeb) {
         return savedUri != null ? '已保存：$fileName' : '已开始下载：$fileName';
       }
@@ -40,12 +62,20 @@ class FileExporter {
     final xfile = tempPath != null
         ? XFile(tempPath, mimeType: mimeType, name: fileName)
         : XFile.fromData(bytes, mimeType: mimeType, name: fileName);
-    await SharePlus.instance.share(
-      ShareParams(
-        files: <XFile>[xfile],
-        subject: fileName,
-      ),
+    final params = ShareParams(
+      files: <XFile>[xfile],
+      subject: fileName,
     );
-    return kIsWeb ? '已导出：$fileName' : '已打开系统分享';
+    final result = _share != null
+        ? await _share(params)
+        : await SharePlus.instance.share(params);
+
+    if (result.status == ShareResultStatus.dismissed) {
+      return '';
+    }
+    if (kIsWeb) {
+      return '已导出：$fileName';
+    }
+    return result.status == ShareResultStatus.success ? '已分享：$fileName' : '已打开系统分享';
   }
 }

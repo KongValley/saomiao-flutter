@@ -34,6 +34,7 @@ class CornersOverlay extends StatefulWidget {
 class _CornersOverlayState extends State<CornersOverlay> {
   late List<Offset> _points;
   bool _detecting = false;
+  int _editEpoch = 0;
   int _activeIndex = -1;
   ui.Image? _decodedUiImage;
   Uint8List? _sourceBytes;
@@ -65,16 +66,22 @@ class _CornersOverlayState extends State<CornersOverlay> {
       _sourceBytes = bytes;
       setState(() {});
       // 解码一份 ui.Image 给拖动放大镜用（失败不影响底图显示）
+      ui.Codec? codec;
+      ui.FrameInfo? frame;
       try {
-        final codec = await ui.instantiateImageCodec(bytes, targetWidth: 1200);
-        final frame = await codec.getNextFrame();
-        codec.dispose();
+        codec = await ui.instantiateImageCodec(bytes, targetWidth: 1200);
+        frame = await codec.getNextFrame();
         if (mounted) {
-          setState(() => _decodedUiImage = frame.image);
-        } else {
-          frame.image.dispose();
+          final img = frame.image;
+          frame = null;
+          setState(() => _decodedUiImage = img);
         }
-      } catch (_) {}
+      } catch (_) {
+        // Ignore loupe decode failure; main preview uses Image.memory.
+      } finally {
+        frame?.image.dispose();
+        codec?.dispose();
+      }
     } catch (_) {
       if (mounted) {
         setState(() => _loadError = '原图读取失败，请重试');
@@ -94,10 +101,11 @@ class _CornersOverlayState extends State<CornersOverlay> {
 
   Future<void> _handleAutoDetect() async {
     if (_detecting) return;
+    final startEpoch = _editEpoch;
     setState(() => _detecting = true);
     try {
       final result = await widget.onAutoDetect();
-      if (!mounted) return;
+      if (!mounted || _editEpoch != startEpoch) return;
       if (result.corners.length != 4) {
         widget.onToast('没能识别出纸张边缘，请手动调整', error: true);
         return;
@@ -114,7 +122,7 @@ class _CornersOverlayState extends State<CornersOverlay> {
         widget.onToast('已自动识别纸张边缘');
       }
     } catch (err) {
-      if (mounted) {
+      if (mounted && _editEpoch == startEpoch) {
         widget.onToast(
           err is StateError ? err.message : '自动检测失败，请手动调整',
           error: true,
@@ -127,6 +135,7 @@ class _CornersOverlayState extends State<CornersOverlay> {
 
   void _handleReset() {
     setState(() {
+      _editEpoch++;
       _points = fullCorners.map((p) => Offset(p.x, p.y)).toList();
     });
     widget.onToast('已恢复整幅画面');
@@ -137,11 +146,14 @@ class _CornersOverlayState extends State<CornersOverlay> {
       widget.onToast('选区太小，请把四个角拉开一些', warn: true);
       return;
     }
-    widget.onApply(
-      _points
-          .map((p) => CornerPoint(p.dx.clamp(0.0, 1.0), p.dy.clamp(0.0, 1.0)))
-          .toList(growable: false),
-    );
+    final candidate = _points
+        .map((p) => CornerPoint(p.dx.clamp(0.0, 1.0), p.dy.clamp(0.0, 1.0)))
+        .toList(growable: false);
+    if (!isValidConvexQuad(candidate, minArea: 0.02)) {
+      widget.onToast('选区不能交叉或内凹，请重新调整四个角', warn: true);
+      return;
+    }
+    widget.onApply(candidate);
   }
 
   @override
@@ -267,9 +279,13 @@ class _CornersOverlayState extends State<CornersOverlay> {
                         height: _handleHitSize,
                         child: GestureDetector(
                           behavior: HitTestBehavior.opaque,
-                          onPanStart: (_) => setState(() => _activeIndex = i),
+                          onPanStart: (_) => setState(() {
+                            _editEpoch++;
+                            _activeIndex = i;
+                          }),
                           onPanUpdate: (details) {
                             setState(() {
+                              _editEpoch++;
                               final nx = (_points[i].dx + details.delta.dx / imageRect.width)
                                   .clamp(0.0, 1.0);
                               final ny = (_points[i].dy + details.delta.dy / imageRect.height)

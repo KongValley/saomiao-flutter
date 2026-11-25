@@ -29,7 +29,7 @@ class EditorScreen extends StatefulWidget {
   State<EditorScreen> createState() => _EditorScreenState();
 }
 
-class _EditorScreenState extends State<EditorScreen> {
+class _EditorScreenState extends State<EditorScreen> with WidgetsBindingObserver {
   final TransformationController _zoomController = TransformationController();
   StreamSubscription<ToastMessage>? _toastSub;
   _InspectorTab _desktopTab = _InspectorTab.style;
@@ -39,12 +39,24 @@ class _EditorScreenState extends State<EditorScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _toastSub = widget.controller.toasts.listen(_showSnack);
     unawaited(widget.controller.init(demoPages: widget.demoPages));
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached ||
+        state == AppLifecycleState.hidden) {
+      unawaited(widget.controller.flushPersist());
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _toastSub?.cancel();
     _zoomController.dispose();
     super.dispose();
@@ -211,12 +223,16 @@ class _EditorScreenState extends State<EditorScreen> {
                               child: CircularProgressIndicator(strokeWidth: 2),
                             ),
                             const SizedBox(width: 8),
-                            Text(
-                              widget.controller.busyLabel,
-                              style: const TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                color: Color(0xFF1D4ED8),
+                            Expanded(
+                              child: Text(
+                                widget.controller.busyLabel,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFF1D4ED8),
+                                ),
                               ),
                             ),
                           ],
@@ -349,13 +365,28 @@ class _EditorScreenState extends State<EditorScreen> {
                       : null,
                 ),
                 ListTile(
-                  leading: const Icon(Icons.delete_outline_rounded, color: AppColors.danger),
-                  title: const Text('删除这一页', style: TextStyle(color: AppColors.danger)),
+                  leading: Icon(
+                    Icons.delete_outline_rounded,
+                    color: widget.controller.isExporting
+                        ? AppColors.inkMuted
+                        : AppColors.danger,
+                  ),
+                  title: Text(
+                    '删除这一页',
+                    style: TextStyle(
+                      color: widget.controller.isExporting
+                          ? AppColors.inkMuted
+                          : AppColors.danger,
+                    ),
+                  ),
+                  enabled: !widget.controller.isExporting,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  onTap: () {
-                    Navigator.of(sheetCtx).pop();
-                    widget.controller.removePage(page);
-                  },
+                  onTap: widget.controller.isExporting
+                      ? null
+                      : () {
+                          Navigator.of(sheetCtx).pop();
+                          widget.controller.removePage(page);
+                        },
                 ),
               ],
             ),
@@ -366,6 +397,24 @@ class _EditorScreenState extends State<EditorScreen> {
   }
 
   Widget _buildEmptyState() {
+    if (!widget.controller.hydrated) {
+      return const Center(
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 12),
+              Text(
+                '正在加载本地扫描库…',
+                style: TextStyle(fontSize: 13, color: AppColors.inkMuted),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     final supportsCamera = widget.controller.supportsCamera;
     return Center(
       child: SingleChildScrollView(
@@ -495,16 +544,22 @@ class _EditorScreenState extends State<EditorScreen> {
             )
           else if (error == null)
             const Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 12),
-                  Text(
-                    '正在生成预览…',
-                    style: TextStyle(fontSize: 13, color: AppColors.inkMuted),
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Padding(
+                  padding: EdgeInsets.all(8),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(),
+                      SizedBox(height: 12),
+                      Text(
+                        '正在生成预览…',
+                        style: TextStyle(fontSize: 13, color: AppColors.inkMuted),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
 
@@ -513,89 +568,126 @@ class _EditorScreenState extends State<EditorScreen> {
             top: 12,
             left: 12,
             right: 12,
-            child: Row(
-              children: [
-                Container(
-                  height: 32,
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: AppColors.ink.withValues(alpha: 0.78),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Text(
-                    widget.controller.state.formatPageCounter(),
-                    style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white,
-                    ),
-                  ),
-                ),
-                if (page.options.corners != null) ...[
-                  const SizedBox(width: 8),
-                  Container(
-                    height: 32,
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.94),
-                      borderRadius: BorderRadius.circular(999),
-                      border: Border.all(color: AppColors.outline),
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.crop_free_rounded,
-                          size: 14,
-                          color: Color(0xFF1D4ED8),
-                        ),
-                        SizedBox(width: 4),
-                        Text(
-                          '已校正',
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: Color(0xFF1D4ED8),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final narrow = constraints.maxWidth < 300;
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Container(
+                            height: narrow ? 28 : 32,
+                            padding: EdgeInsets.symmetric(horizontal: narrow ? 9 : 12),
+                            decoration: BoxDecoration(
+                              color: AppColors.ink.withValues(alpha: 0.78),
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    widget.controller.state.formatPageCounter(),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: narrow ? 12 : 13,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
-                      ],
+                          if (page.options.corners != null)
+                            Container(
+                              height: narrow ? 28 : 32,
+                              padding: EdgeInsets.symmetric(horizontal: narrow ? 8 : 10),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(alpha: 0.94),
+                                borderRadius: BorderRadius.circular(999),
+                                border: Border.all(color: AppColors.outline),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.crop_free_rounded,
+                                    size: 14,
+                                    color: Color(0xFF1D4ED8),
+                                  ),
+                                  if (!narrow) ...[
+                                    const SizedBox(width: 4),
+                                    const Text(
+                                      '已校正',
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w600,
+                                        color: Color(0xFF1D4ED8),
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
-                const Spacer(),
-                Material(
-                  color: Colors.white.withValues(alpha: 0.92),
-                  borderRadius: BorderRadius.circular(999),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        tooltip: '旋转 90°',
-                        visualDensity: VisualDensity.compact,
-                        onPressed: () => widget.controller.rotatePage(page),
-                        icon: const Icon(Icons.rotate_right_rounded, size: 19),
+                    const SizedBox(width: 6),
+                    Material(
+                      color: Colors.white.withValues(alpha: 0.92),
+                      borderRadius: BorderRadius.circular(999),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            tooltip: '旋转 90°',
+                            visualDensity: VisualDensity.compact,
+                            style: narrow
+                                ? IconButton.styleFrom(
+                                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                    minimumSize: const Size(32, 32),
+                                    padding: const EdgeInsets.all(6),
+                                  )
+                                : null,
+                            onPressed: () => widget.controller.rotatePage(page),
+                            icon: Icon(Icons.rotate_right_rounded, size: narrow ? 17 : 19),
+                          ),
+                          IconButton(
+                            tooltip: '页面操作',
+                            visualDensity: VisualDensity.compact,
+                            style: narrow
+                                ? IconButton.styleFrom(
+                                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                    minimumSize: const Size(32, 32),
+                                    padding: const EdgeInsets.all(6),
+                                  )
+                                : null,
+                            onPressed: () => _openPageActions(
+                              page,
+                              widget.controller.currentIndex,
+                            ),
+                            icon: Icon(Icons.more_horiz_rounded, size: narrow ? 17 : 19),
+                          ),
+                        ],
                       ),
-                      IconButton(
-                        tooltip: '页面操作',
-                        visualDensity: VisualDensity.compact,
-                        onPressed: () => _openPageActions(
-                          page,
-                          widget.controller.currentIndex,
-                        ),
-                        icon: const Icon(Icons.more_horiz_rounded, size: 19),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+                    ),
+                  ],
+                );
+              },
             ),
           ),
 
           if (error == null)
             Positioned(
-              left: 0,
-              right: 0,
+              left: 12,
+              right: 12,
               bottom: 14,
               child: IgnorePointer(
                 child: Center(
@@ -607,6 +699,9 @@ class _EditorScreenState extends State<EditorScreen> {
                     ),
                     child: const Text(
                       '双指或双击缩放 · 长按缩略图可拖动排序',
+                      textAlign: TextAlign.center,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(fontSize: 13, color: Colors.white),
                     ),
                   ),
@@ -724,7 +819,7 @@ class _EditorScreenState extends State<EditorScreen> {
               TopBar(
                 hasPages: hasPages,
                 supportsCamera: widget.controller.supportsCamera,
-                busy: widget.controller.isBusy,
+                busy: widget.controller.isBusy || !widget.controller.hydrated,
                 onTakePhoto: widget.controller.takePhoto,
                 onPickGallery: widget.controller.pickFromGallery,
                 onLoadDemo: () => widget.controller.loadDemoPages(),
@@ -750,7 +845,7 @@ class _EditorScreenState extends State<EditorScreen> {
                                 PageStrip(
                                   pages: widget.controller.pages,
                                   currentIndex: widget.controller.currentIndex,
-                                  renderOf: widget.controller.renderOf,
+                                  thumbnailOf: widget.controller.thumbnailOf,
                                   onSelect: (idx) {
                                     _resetZoom();
                                     widget.controller.selectPage(idx);

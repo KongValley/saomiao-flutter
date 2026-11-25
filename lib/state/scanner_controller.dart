@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
 
@@ -34,6 +35,9 @@ class ScannerController extends ChangeNotifier {
     _jobs = jobs ?? RenderJobs(storage: _storage);
   }
 
+  static const int _maxMemoryRenders = 12;
+  static const int _maxMemoryRenderBytes = 32 * 1024 * 1024;
+
   final AppStorage _storage;
   late final RenderJobs _jobs;
   final ImageAcquisition _acquisition;
@@ -48,27 +52,49 @@ class ScannerController extends ChangeNotifier {
 
   bool _hydrated = false;
   bool get hydrated => _hydrated;
+  Future<void>? _initFuture;
 
-  final Map<String, RenderedPageResult> _renders = <String, RenderedPageResult>{};
+  final LinkedHashMap<String, RenderedPageResult> _renders =
+      LinkedHashMap<String, RenderedPageResult>();
+  final Map<String, Uint8List> _thumbnails = <String, Uint8List>{};
   final Map<String, String> _renderErrors = <String, String>{};
-  RenderedPageResult? renderOf(String id) => _renders[id];
+  final Set<String> _stalePages = <String>{};
+  final Set<String> _pinnedSourceUris = <String>{};
+
+  RenderedPageResult? renderOf(String id) {
+    final hit = _renders[id];
+    if (hit != null) {
+      // Touch LRU order.
+      _renders.remove(id);
+      _renders[id] = hit;
+    }
+    return hit;
+  }
+
+  Uint8List? thumbnailOf(String id) => _thumbnails[id] ?? _renders[id]?.bytes;
   String? errorOf(String id) => _renderErrors[id];
   RenderedPageResult? get currentRender =>
-      currentPage != null ? _renders[currentPage!.id] : null;
+      currentPage != null ? renderOf(currentPage!.id) : null;
   String? get currentError =>
       currentPage != null ? _renderErrors[currentPage!.id] : null;
 
-  bool _busy = false;
-  String _busyLabel = '正在处理…';
-  bool get isBusy => _busy;
-  String get busyLabel => _busyLabel;
-
+  bool _rendering = false;
+  String _renderLabel = '正在处理…';
+  bool _generatingDemo = false;
   bool _exporting = false;
+  String _exportLabel = '正在导出…';
+
+  bool get isBusy => _rendering || _generatingDemo || _exporting;
   bool get isExporting => _exporting;
+  String get busyLabel {
+    if (_exporting) return _exportLabel;
+    if (_generatingDemo) return '正在生成示例文档…';
+    return _renderLabel;
+  }
 
   bool get supportsCamera => _acquisition.supportsCamera;
 
-  Map<String, ScanOptions>? _undoSnapshot;
+  Map<String, Map<String, Object?>>? _undoSnapshot;
   bool get canUndoBatch => _undoSnapshot != null;
 
   final StreamController<ToastMessage> _toastController =
@@ -78,6 +104,7 @@ class ScannerController extends ChangeNotifier {
   int _renderSeq = 0;
   Timer? _debounceTimer;
   Timer? _persistTimer;
+  bool _persistDirty = false;
   bool _disposed = false;
 
   void _emitToast(String text, [ToastKind kind = ToastKind.info]) {
@@ -89,38 +116,115 @@ class ScannerController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
-  Future<void> init({List<PageItem>? demoPages}) async {
+  void _putRenderInMemory(String pageId, RenderedPageResult result) {
+    _renders.remove(pageId);
+    _renders[pageId] = result;
+    _thumbnails[pageId] = result.thumbBytes ?? result.bytes;
+    _evictMemoryRenders();
+  }
+
+  void _evictMemoryRenders() {
+    int totalBytes() {
+      var sum = 0;
+      for (final entry in _renders.values) {
+        sum += entry.bytes.length;
+      }
+      return sum;
+    }
+
+    final keepId = currentPage?.id;
+    while (_renders.length > _maxMemoryRenders ||
+        (_renders.length > 1 && totalBytes() > _maxMemoryRenderBytes)) {
+      String? victim;
+      for (final id in _renders.keys) {
+        if (id != keepId) {
+          victim = id;
+          break;
+        }
+      }
+      if (victim == null) break;
+      _renders.remove(victim);
+    }
+  }
+
+  Future<void> init({List<PageItem>? demoPages}) {
+    if (_initFuture != null) return _initFuture!;
+    final future = _runInit(demoPages: demoPages);
+    _initFuture = future;
+    return future;
+  }
+
+  Future<void> _runInit({List<PageItem>? demoPages}) async {
     try {
       final stored = await _storage.loadPages();
       if (_disposed) return;
-      final initial = stored.isNotEmpty ? stored : (demoPages ?? const <PageItem>[]);
-      if (initial.isNotEmpty) {
-        _state = _state.replaceAll(initial);
+
+      List<PickedImageEntry> lost = const <PickedImageEntry>[];
+      try {
+        lost = await _acquisition.retrieveLostEntries();
+      } catch (err) {
+        _emitToast(_readableError(err, '恢复上次选图失败，请重试'), ToastKind.error);
+      }
+      if (_disposed) return;
+
+      if (stored.isNotEmpty) {
+        _state = _state.replaceAll(stored);
+      } else if (lost.isEmpty && demoPages != null && demoPages.isNotEmpty) {
+        _state = _state.replaceAll(demoPages);
+      }
+
+      if (lost.isNotEmpty) {
+        await _importEntriesInternal(lost, persistImmediately: false);
+      } else if (_state.pages.isNotEmpty) {
         _notify();
-        unawaited(_runRender(initial.first));
+        unawaited(_runRender(_state.currentPage ?? _state.pages.first));
       }
     } catch (err) {
       _emitToast(_readableError(err, '本地页面读取失败'), ToastKind.error);
     } finally {
       _hydrated = true;
+      if (!_disposed && _persistDirty && _storage.isPersistent) {
+        unawaited(flushPersist());
+      } else if (!_disposed && _state.pages.isNotEmpty && _storage.isPersistent) {
+        // Ensure recovered lost pages from Android startup are persisted once hydrated.
+        _schedulePersist();
+      }
       _notify();
     }
   }
 
   void _schedulePersist() {
-    if (!_hydrated || !_storage.isPersistent) return;
+    if (!_storage.isPersistent) return;
+    _persistDirty = true;
+    if (!_hydrated) return;
     _persistTimer?.cancel();
     _persistTimer = Timer(const Duration(milliseconds: 500), () {
+      _persistDirty = false;
       _storage.savePages(_state.pages).catchError((Object err) {
+        _persistDirty = true;
         _emitToast(_readableError(err, '保存页面失败'), ToastKind.error);
       });
     });
   }
 
+  Future<void> flushPersist() async {
+    if (!_storage.isPersistent || !_hydrated || !_persistDirty) return;
+    _persistTimer?.cancel();
+    _persistTimer = null;
+    _persistDirty = false;
+    final snapshot = List<PageItem>.unmodifiable(_state.pages);
+    try {
+      await _storage.savePages(snapshot);
+    } catch (err) {
+      _persistDirty = true;
+      _emitToast(_readableError(err, '保存页面失败'), ToastKind.error);
+    }
+  }
+
   Future<void> _runRender(PageItem page) async {
     final seq = ++_renderSeq;
-    _busy = true;
-    _busyLabel = '正在处理…';
+    _rendering = true;
+    _renderLabel = '正在处理…';
     _notify();
     try {
       final result = await _jobs.renderPageTask(
@@ -128,26 +232,32 @@ class ScannerController extends ChangeNotifier {
         page.options,
         onStage: (stage) {
           if (seq == _renderSeq && !_disposed) {
-            _busy = true;
-            _busyLabel = '正在$stage…';
+            _rendering = true;
+            _renderLabel = '正在$stage…';
             _notify();
           }
         },
         shouldAbort: () => seq != _renderSeq || _disposed,
       );
       if (seq != _renderSeq || _disposed) return;
-      _renders[page.id] = result;
+      final latestIndex = _state.pages.indexWhere((p) => p.id == page.id);
+      if (latestIndex < 0) return;
+      _putRenderInMemory(page.id, result);
       _renderErrors.remove(page.id);
+      if (_state.pages[latestIndex].options == page.options) {
+        _stalePages.remove(page.id);
+      }
     } catch (err) {
       if (seq != _renderSeq || _disposed) return;
+      if (!_state.pages.any((p) => p.id == page.id)) return;
       final msg = _readableError(err, '处理失败，请重试');
       if (msg == kAbortMessage) return;
       _renderErrors[page.id] = msg;
       _emitToast(msg, ToastKind.error);
     } finally {
       if (seq == _renderSeq && !_disposed) {
-        _busy = false;
-        _busyLabel = '正在处理…';
+        _rendering = false;
+        _renderLabel = '正在处理…';
         _notify();
       }
     }
@@ -160,15 +270,17 @@ class ScannerController extends ChangeNotifier {
       return;
     }
     _debounceTimer = Timer(Duration(milliseconds: delayMs), () {
-      unawaited(_runRender(page));
+      final current = currentPage;
+      if (_disposed || current == null || current.id != page.id) return;
+      unawaited(_runRender(current));
     });
   }
 
   Future<void> takePhoto() async {
     try {
-      final picked = await _acquisition.takePhoto();
-      if (picked == null) return;
-      await importPickedImages(<PickedImageInput>[picked]);
+      final entry = await _acquisition.takePhotoEntry();
+      if (entry == null) return;
+      await importPickedEntries(<PickedImageEntry>[entry]);
     } catch (err) {
       _emitToast(_readableError(err, '打开相机失败，请重试'), ToastKind.error);
     }
@@ -176,18 +288,17 @@ class ScannerController extends ChangeNotifier {
 
   Future<void> pickFromGallery() async {
     try {
-      final picked = await _acquisition.pickFromGallery();
-      if (picked.isEmpty) return;
-      await importPickedImages(picked);
+      final entries = await _acquisition.pickFromGalleryEntries();
+      if (entries.isEmpty) return;
+      await importPickedEntries(entries);
     } catch (err) {
       _emitToast(_readableError(err, '打开相册失败，请重试'), ToastKind.error);
     }
   }
 
   Future<void> loadDemoPages([int count = 2]) async {
-    if (_busy) return;
-    _busy = true;
-    _busyLabel = '正在生成示例文档…';
+    if (_generatingDemo || _exporting) return;
+    _generatingDemo = true;
     _notify();
     try {
       final demos = await generateDemoDocuments(count);
@@ -195,37 +306,74 @@ class ScannerController extends ChangeNotifier {
     } catch (err) {
       _emitToast(_readableError(err, '示例文档生成失败'), ToastKind.error);
     } finally {
-      if (!_disposed && _busyLabel == '正在生成示例文档…') {
-        _busy = false;
+      if (!_disposed) {
+        _generatingDemo = false;
         _notify();
       }
     }
   }
 
-  Future<void> importPickedImages(List<PickedImageInput> inputs) async {
-    if (inputs.isEmpty) return;
+  Future<void> importPickedImages(List<PickedImageInput> inputs) {
+    if (inputs.isEmpty) return Future<void>.value();
+    return importPickedEntries(
+      inputs.map(PickedImageEntry.fromInput).toList(growable: false),
+    );
+  }
+
+  Future<void> importPickedEntries(List<PickedImageEntry> entries) async {
+    if (entries.isEmpty) return;
+    if (_initFuture != null && !_hydrated) {
+      await _initFuture;
+    }
+    if (_disposed) return;
+    await _importEntriesInternal(entries, persistImmediately: true);
+  }
+
+  Future<void> _importEntriesInternal(
+    List<PickedImageEntry> entries, {
+    required bool persistImmediately,
+  }) async {
     final added = <PageItem>[];
-    for (final input in inputs) {
+    for (final entry in entries) {
       try {
-        if (input.bytes.length > 60 * 1024 * 1024) {
-          _emitToast('「${input.name}」超过 60MB，请压缩后再试', ToastKind.warn);
+        final byteLength = await entry.length();
+        if (byteLength > kMaxImportFileBytes) {
+          _emitToast('「${entry.name}」超过 60MB，请压缩后再试', ToastKind.warn);
           continue;
         }
-        final size = await probeImageSize(input.bytes);
+        final bytes = await entry.readAsBytes();
+        if (bytes.isEmpty) {
+          _emitToast('「${entry.name}」内容为空，已跳过', ToastKind.error);
+          continue;
+        }
+        if (bytes.length > kMaxImportFileBytes) {
+          _emitToast('「${entry.name}」超过 60MB，请压缩后再试', ToastKind.warn);
+          continue;
+        }
+        final size = await probeImageSize(bytes);
+        if (size == null || size.width <= 0 || size.height <= 0) {
+          _emitToast('「${entry.name}」无法解析，已跳过', ToastKind.error);
+          continue;
+        }
+        if (size.width * size.height > kHardLimitPixels) {
+          _emitToast('「${entry.name}」分辨率过高，请先压缩后再导入', ToastKind.warn);
+          continue;
+        }
+
         final pageId = createPageId();
         final sourceUri = await _storage.saveSourceBytes(
-          input.bytes,
+          bytes,
           pageId,
-          input.name,
+          entry.name,
         );
         final page = createPage(
           id: pageId,
-          name: input.name.isNotEmpty
-              ? input.name
+          name: entry.name.isNotEmpty
+              ? entry.name
               : '扫描页_${_state.pages.length + 1}',
           sourceUri: sourceUri,
-          sourceW: size?.width ?? 1200,
-          sourceH: size?.height ?? 1600,
+          sourceW: size.width,
+          sourceH: size.height,
           options: ScanOptions.defaults,
         );
         added.add(page);
@@ -234,8 +382,12 @@ class ScannerController extends ChangeNotifier {
         _emitToast(_readableError(err, '导入失败，请重试'), ToastKind.error);
       }
     }
-    if (added.isNotEmpty) {
-      _schedulePersist();
+    if (added.isNotEmpty && !_disposed) {
+      if (persistImmediately) {
+        _schedulePersist();
+      } else {
+        _persistDirty = true;
+      }
       _notify();
       await _runRender(added.last);
       if (added.length > 1) {
@@ -250,32 +402,55 @@ class ScannerController extends ChangeNotifier {
 
   void selectPage(int index) {
     if (index < 0 || index >= _state.pages.length) return;
+    final prevId = currentPage?.id;
+    _debounceTimer?.cancel();
     _state = _state.selectIndex(index);
-    _notify();
     final page = _state.currentPage;
-    if (page != null && !_renders.containsKey(page.id)) {
+    if (prevId != null && prevId != page?.id && _rendering) {
+      _renderSeq++;
+      _rendering = false;
+      _renderLabel = '正在处理…';
+    }
+    _notify();
+    if (page != null && (!_renders.containsKey(page.id) || _stalePages.contains(page.id))) {
       unawaited(_runRender(page));
     }
   }
 
   void removePage(PageItem page) {
+    if (_exporting || _pinnedSourceUris.contains(page.sourceUri)) {
+      _emitToast('正在导出，请稍后再删除页面', ToastKind.warn);
+      return;
+    }
     final index = _state.pages.indexWhere((p) => p.id == page.id);
     if (index < 0) return;
     final wasCurrent = currentPage?.id == page.id;
+    if (wasCurrent) {
+      _debounceTimer?.cancel();
+      _renderSeq++;
+      _rendering = false;
+      _renderLabel = '正在处理…';
+    }
     _renders.remove(page.id);
+    _thumbnails.remove(page.id);
     _renderErrors.remove(page.id);
+    _stalePages.remove(page.id);
     _state = _state.removePage(page.id);
     _schedulePersist();
     _notify();
     unawaited(_storage.deleteSource(page.sourceUri));
     _emitToast('已删除这一页', ToastKind.info);
-    if (wasCurrent && _state.currentPage != null && !_renders.containsKey(_state.currentPage!.id)) {
+    if (wasCurrent &&
+        _state.currentPage != null &&
+        (!_renders.containsKey(_state.currentPage!.id) ||
+            _stalePages.contains(_state.currentPage!.id))) {
       _scheduleRender(_state.currentPage!);
     }
   }
 
   void rotatePage(PageItem page) {
     _state = _state.rotatePage(page.id);
+    _stalePages.add(page.id);
     _schedulePersist();
     _notify();
     final updated = _state.pages.firstWhere(
@@ -286,6 +461,7 @@ class ScannerController extends ChangeNotifier {
       _scheduleRender(updated);
     } else {
       _renders.remove(page.id);
+      _thumbnails.remove(page.id);
     }
     _emitToast('已旋转 ${updated.options.rotate}°', ToastKind.success);
   }
@@ -309,6 +485,7 @@ class ScannerController extends ChangeNotifier {
     final page = currentPage;
     if (page == null) return;
     _state = _state.updateOptions(page.id, patch);
+    _stalePages.add(page.id);
     _schedulePersist();
     _notify();
     final nextPage = _state.currentPage;
@@ -325,6 +502,7 @@ class ScannerController extends ChangeNotifier {
       rotate: page.options.rotate,
     );
     _state = _state.updateOptions(page.id, reset.toJson());
+    _stalePages.add(page.id);
     _schedulePersist();
     _notify();
     if (_state.currentPage != null) {
@@ -336,11 +514,13 @@ class ScannerController extends ChangeNotifier {
   void applyOptionsToAll() {
     final page = currentPage;
     if (page == null || _state.pages.length < 2) return;
-    _undoSnapshot = <String, ScanOptions>{
-      for (final p in _state.pages) p.id: p.options,
+    _undoSnapshot = <String, Map<String, Object?>>{
+      for (final p in _state.pages) p.id: p.options.toStylePatch(),
     };
     final patch = page.options.toStylePatch();
     _renders.clear();
+    _thumbnails.clear();
+    _stalePages.addAll(_state.pages.map((p) => p.id));
     _state = _state.updateAllOptions(patch);
     _schedulePersist();
     _notify();
@@ -353,9 +533,11 @@ class ScannerController extends ChangeNotifier {
   void undoApplyAll() {
     final snapshot = _undoSnapshot;
     if (snapshot == null) return;
-    _state = _state.restoreOptions(snapshot);
+    _state = _state.restoreStylePatches(snapshot);
     _undoSnapshot = null;
     _renders.clear();
+    _thumbnails.clear();
+    _stalePages.addAll(_state.pages.map((p) => p.id));
     _schedulePersist();
     _notify();
     if (_state.currentPage != null) {
@@ -374,6 +556,7 @@ class ScannerController extends ChangeNotifier {
     _state = _state.updateOptions(page.id, <String, Object?>{
       'corners': corners.map((c) => c.toJson()).toList(growable: false),
     });
+    _stalePages.add(page.id);
     _schedulePersist();
     _notify();
     if (_state.currentPage != null) {
@@ -396,10 +579,11 @@ class ScannerController extends ChangeNotifier {
   }) async {
     final page = currentPage;
     if (page == null || _exporting) return;
-    final items = allPages ? _state.pages : <PageItem>[page];
+    final items = List<PageItem>.unmodifiable(allPages ? _state.pages : <PageItem>[page]);
+    final pinned = items.map((p) => p.sourceUri).toList(growable: false);
+    _pinnedSourceUris.addAll(pinned);
     _exporting = true;
-    _busy = true;
-    _busyLabel = '正在生成 PDF…';
+    _exportLabel = '正在生成 PDF…';
     _notify();
     try {
       final outcome = await _jobs.exportPdfTask(
@@ -407,7 +591,7 @@ class ScannerController extends ChangeNotifier {
         pdfOptions,
         onProgress: (done, total) {
           if (!_disposed) {
-            _busyLabel = '正在生成 PDF（$done/$total）…';
+            _exportLabel = '正在生成 PDF（$done/$total）…';
             _notify();
           }
         },
@@ -426,9 +610,9 @@ class ScannerController extends ChangeNotifier {
     } catch (err) {
       _emitToast(_readableError(err, 'PDF 导出失败，请重试'), ToastKind.error);
     } finally {
+      _pinnedSourceUris.removeAll(pinned);
       _exporting = false;
-      _busy = false;
-      _busyLabel = '正在处理…';
+      _exportLabel = '正在导出…';
       _notify();
     }
   }
@@ -438,9 +622,9 @@ class ScannerController extends ChangeNotifier {
   }) async {
     final page = currentPage;
     if (page == null || _exporting) return;
+    _pinnedSourceUris.add(page.sourceUri);
     _exporting = true;
-    _busy = true;
-    _busyLabel = '正在导出图片…';
+    _exportLabel = '正在导出图片…';
     _notify();
     try {
       final outcome = await _jobs.exportImageTask(page, page.options);
@@ -460,9 +644,9 @@ class ScannerController extends ChangeNotifier {
     } catch (err) {
       _emitToast(_readableError(err, '图片导出失败，请重试'), ToastKind.error);
     } finally {
+      _pinnedSourceUris.remove(page.sourceUri);
       _exporting = false;
-      _busy = false;
-      _busyLabel = '正在处理…';
+      _exportLabel = '正在导出…';
       _notify();
     }
   }
@@ -470,7 +654,7 @@ class ScannerController extends ChangeNotifier {
   String _timestampName(String prefix, String ext) {
     final now = DateTime.now();
     String pad(int v) => v.toString().padLeft(2, '0');
-    return '${prefix}_${now.year}${pad(now.month)}${pad(now.day)}_${pad(now.hour)}${pad(now.minute)}.$ext';
+    return '${prefix}_${now.year}${pad(now.month)}${pad(now.day)}_${pad(now.hour)}${pad(now.minute)}${pad(now.second)}.$ext';
   }
 
   String _readableError(Object err, String fallback) {
@@ -487,7 +671,14 @@ class ScannerController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _debounceTimer?.cancel();
-    _persistTimer?.cancel();
+    if (_persistDirty && _hydrated && _storage.isPersistent) {
+      _persistTimer?.cancel();
+      _persistDirty = false;
+      final snapshot = List<PageItem>.unmodifiable(_state.pages);
+      unawaited(_storage.savePages(snapshot).catchError((_) {}));
+    } else {
+      _persistTimer?.cancel();
+    }
     _toastController.close();
     super.dispose();
   }

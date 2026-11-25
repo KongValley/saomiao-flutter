@@ -246,7 +246,45 @@ bool _toBool(Object? v) {
   return v == true || v == 1 || v == '1' || v == 'true' || v == 'on';
 }
 
-/// 规范化四角：必须 4 个点，坐标 clamp 到 0..1；面积过小（< 0.01）视为退化并返回 null
+/// 校验四角是否构成非退化、非内凹、非自相交的凸四边形
+bool isValidConvexQuad(List<CornerPoint> pts, {double minArea = 0.01}) {
+  if (pts.length != 4) return false;
+  for (final p in pts) {
+    if (!p.x.isFinite || !p.y.isFinite) return false;
+  }
+  for (var i = 0; i < 4; i++) {
+    for (var j = i + 1; j < 4; j++) {
+      final dx = pts[i].x - pts[j].x;
+      final dy = pts[i].y - pts[j].y;
+      if (dx * dx + dy * dy < 1e-6) return false;
+    }
+  }
+  var area2 = 0.0;
+  for (var i = 0; i < 4; i++) {
+    final a = pts[i];
+    final b = pts[(i + 1) % 4];
+    area2 += a.x * b.y - b.x * a.y;
+  }
+  if (area2.abs() / 2.0 < minArea) return false;
+
+  var sign = 0;
+  for (var i = 0; i < 4; i++) {
+    final a = pts[i];
+    final b = pts[(i + 1) % 4];
+    final c = pts[(i + 2) % 4];
+    final cr = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+    if (cr.abs() <= 1e-6) return false;
+    final s = cr > 0 ? 1 : -1;
+    if (sign == 0) {
+      sign = s;
+    } else if (s != sign) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/// 规范化四角：必须 4 个点，坐标 clamp 到 0..1；非凸、自相交或面积过小（< 0.01）视为退化并返回 null
 List<CornerPoint>? normalizeCorners(Object? raw) {
   if (raw is! List || raw.length != 4) return null;
   final pts = <CornerPoint>[];
@@ -271,13 +309,7 @@ List<CornerPoint>? normalizeCorners(Object? raw) {
     final cy = y < 0 ? 0.0 : (y > 1 ? 1.0 : y);
     pts.add(CornerPoint(cx, cy));
   }
-  var area2 = 0.0;
-  for (var i = 0; i < 4; i++) {
-    final a = pts[i];
-    final b = pts[(i + 1) % 4];
-    area2 += a.x * b.y - b.x * a.y;
-  }
-  if (area2.abs() / 2 < 0.01) return null;
+  if (!isValidConvexQuad(pts, minArea: 0.01)) return null;
   return List<CornerPoint>.unmodifiable(pts);
 }
 

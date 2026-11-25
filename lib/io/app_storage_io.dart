@@ -9,22 +9,35 @@ import '../state/page_models.dart';
 import 'app_storage.dart';
 
 class IoAppStorage implements AppStorage {
+  IoAppStorage({
+    this._documentsDirProvider,
+    this._tempDirProvider,
+  });
+
   static const String _rootFolder = 'saomiao-scan';
+  static const String _origRelativePrefix = 'orig/';
   static final RegExp _cacheNameRe =
       RegExp(r'^cache_([a-z0-9]+)_(\d+)x(\d+)\.(jpg|png)$', caseSensitive: false);
+  static final RegExp _validKeyRe = RegExp(r'^[a-z0-9]{1,64}$', caseSensitive: false);
+
+  final Future<Directory> Function()? _documentsDirProvider;
+  final Future<Directory> Function()? _tempDirProvider;
 
   Directory? _docRoot;
   Directory? _origDir;
   Directory? _cacheRenderDir;
   Directory? _exportDir;
 
+  Future<void> _saveChain = Future<void>.value();
+  int _tmpSeq = 0;
+
   @override
   bool get isPersistent => true;
 
   Future<void> _ensureDirs() async {
     if (_docRoot != null) return;
-    final docs = await getApplicationDocumentsDirectory();
-    final temp = await getTemporaryDirectory();
+    final docs = await (_documentsDirProvider?.call() ?? getApplicationDocumentsDirectory());
+    final temp = await (_tempDirProvider?.call() ?? getTemporaryDirectory());
     final root = Directory(p.join(docs.path, _rootFolder));
     final orig = Directory(p.join(root.path, 'orig'));
     final cacheRender = Directory(p.join(temp.path, _rootFolder, 'render'));
@@ -48,11 +61,88 @@ class IoAppStorage implements AppStorage {
     return '.jpg';
   }
 
-  File _resolveFile(String uriOrPath) {
+  String _extractBasename(String rawPath) {
+    final normalized = rawPath.replaceAll('\\', '/');
+    return p.posix.basename(normalized);
+  }
+
+  File? _resolvePrimaryFile(String uriOrPath) {
     if (uriOrPath.startsWith('file://')) {
-      return File.fromUri(Uri.parse(uriOrPath));
+      final parsed = Uri.tryParse(uriOrPath);
+      if (parsed == null || !parsed.isScheme('file')) return null;
+      try {
+        return File.fromUri(parsed);
+      } catch (_) {
+        return null;
+      }
+    }
+    final normalized = uriOrPath.replaceAll('\\', '/');
+    if (normalized.startsWith(_origRelativePrefix)) {
+      final rel = normalized.substring(_origRelativePrefix.length);
+      return File(p.join(_origDir!.path, rel));
+    }
+    if (!p.isAbsolute(uriOrPath)) {
+      return File(p.join(_docRoot!.path, uriOrPath));
     }
     return File(uriOrPath);
+  }
+
+  Future<({File file, String? migratedSourceUri})?> _resolveExistingSource(
+    String sourceUri,
+  ) async {
+    await _ensureDirs();
+    final primary = _resolvePrimaryFile(sourceUri);
+    final normalized = sourceUri.replaceAll('\\', '/');
+    if (primary != null && await primary.exists()) {
+      final base = _extractBasename(normalized);
+      final inOrig = File(p.join(_origDir!.path, base));
+      if (!normalized.startsWith(_origRelativePrefix) &&
+          p.equals(p.normalize(primary.path), p.normalize(inOrig.path))) {
+        return (file: primary, migratedSourceUri: '$_origRelativePrefix$base');
+      }
+      return (file: primary, migratedSourceUri: null);
+    }
+
+    // Fallback: container root relocated (e.g. iOS container UUID changed or backup restored).
+    final base = _extractBasename(normalized);
+    if (base.isEmpty || base == '.' || base == '..') return null;
+    final relocated = File(p.join(_origDir!.path, base));
+    if (await relocated.exists()) {
+      return (file: relocated, migratedSourceUri: '$_origRelativePrefix$base');
+    }
+    return null;
+  }
+
+  Future<List<dynamic>?> _tryDecodeIndexFile(File file) async {
+    try {
+      if (!await file.exists()) return null;
+      final rawText = await file.readAsString();
+      if (rawText.trim().isEmpty) return null;
+      final decoded = jsonDecode(rawText);
+      return decoded is List ? decoded : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _cleanupStrayIndexFiles() async {
+    try {
+      await for (final entity in _docRoot!.list()) {
+        if (entity is! File) continue;
+        final name = p.basename(entity.path);
+        if (name == 'pages.json.bak' ||
+            name == 'pages.json.tmp' ||
+            name.startsWith('pages.json.tmp.')) {
+          try {
+            await entity.delete();
+          } catch (_) {
+            // Ignore locked temp file cleanup errors.
+          }
+        }
+      }
+    } catch (_) {
+      // Ignore directory listing errors.
+    }
   }
 
   @override
@@ -60,18 +150,63 @@ class IoAppStorage implements AppStorage {
     try {
       await _ensureDirs();
       final metaFile = File(p.join(_docRoot!.path, 'pages.json'));
-      if (!await metaFile.exists()) return const <PageItem>[];
-      final rawText = await metaFile.readAsString();
-      final decoded = jsonDecode(rawText);
-      if (decoded is! List) return const <PageItem>[];
+      final bakFile = File(p.join(_docRoot!.path, 'pages.json.bak'));
+
+      var recovered = false;
+      List<dynamic>? decoded = await _tryDecodeIndexFile(metaFile);
+
+      if (decoded == null) {
+        decoded = await _tryDecodeIndexFile(bakFile);
+        if (decoded != null) recovered = true;
+      }
+
+      if (decoded == null) {
+        final staged = <({File file, DateTime modified})>[];
+        await for (final entity in _docRoot!.list()) {
+          if (entity is! File) continue;
+          final name = p.basename(entity.path);
+          if (name == 'pages.json.tmp' || name.startsWith('pages.json.tmp.')) {
+            final stat = await entity.stat();
+            staged.add((file: entity, modified: stat.modified));
+          }
+        }
+        staged.sort((a, b) => b.modified.compareTo(a.modified));
+        for (final entry in staged) {
+          decoded = await _tryDecodeIndexFile(entry.file);
+          if (decoded != null) {
+            recovered = true;
+            break;
+          }
+        }
+      }
+
+      if (decoded == null) return const <PageItem>[];
+
       final out = <PageItem>[];
+      var migrated = false;
       for (final row in decoded) {
         final item = PageItem.tryFromJson(row);
         if (item == null) continue;
-        final srcFile = _resolveFile(item.sourceUri);
-        if (!await srcFile.exists()) continue;
-        out.add(item);
+        final resolved = await _resolveExistingSource(item.sourceUri);
+        if (resolved == null) continue;
+        if (resolved.migratedSourceUri != null) {
+          out.add(item.copyWith(sourceUri: resolved.migratedSourceUri));
+          migrated = true;
+        } else {
+          out.add(item);
+        }
       }
+
+      if (recovered || migrated) {
+        try {
+          await savePages(out);
+        } catch (_) {
+          // Best-effort index recovery/migration persist.
+        }
+      } else {
+        await _cleanupStrayIndexFiles();
+      }
+
       return out;
     } catch (_) {
       return const <PageItem>[];
@@ -79,16 +214,53 @@ class IoAppStorage implements AppStorage {
   }
 
   @override
-  Future<void> savePages(List<PageItem> pages) async {
+  Future<void> savePages(List<PageItem> pages) {
+    final snapshot = List<PageItem>.unmodifiable(pages);
+    final next = _saveChain.then((_) => _writePagesAtomic(snapshot));
+    _saveChain = next.catchError((_) {});
+    return next;
+  }
+
+  Future<void> _writePagesAtomic(List<PageItem> pages) async {
     await _ensureDirs();
     final metaFile = File(p.join(_docRoot!.path, 'pages.json'));
-    final tmpFile = File(p.join(_docRoot!.path, 'pages.json.tmp'));
-    final jsonText = jsonEncode(pages.map((p) => p.toJson()).toList(growable: false));
-    await tmpFile.writeAsString(jsonText, flush: true);
-    if (await metaFile.exists()) {
-      await metaFile.delete();
+    final bakFile = File(p.join(_docRoot!.path, 'pages.json.bak'));
+    final tmpFile = File(p.join(_docRoot!.path, 'pages.json.tmp.${++_tmpSeq}'));
+    final jsonText = jsonEncode(pages.map((item) => item.toJson()).toList(growable: false));
+
+    var movedMetaToBak = false;
+    try {
+      await tmpFile.writeAsString(jsonText, flush: true);
+      if (await metaFile.exists()) {
+        if (await bakFile.exists()) {
+          await bakFile.delete();
+        }
+        await metaFile.rename(bakFile.path);
+        movedMetaToBak = true;
+      }
+      await tmpFile.rename(metaFile.path);
+      if (await bakFile.exists()) {
+        try {
+          await bakFile.delete();
+        } catch (_) {
+          // Ignore stale backup cleanup failure after commit.
+        }
+      }
+    } catch (_) {
+      if (movedMetaToBak && !await metaFile.exists() && await bakFile.exists()) {
+        try {
+          await bakFile.rename(metaFile.path);
+        } catch (_) {
+          // Keep bakFile intact for startup recovery if rollback rename fails.
+        }
+      }
+      if (await tmpFile.exists()) {
+        try {
+          await tmpFile.delete();
+        } catch (_) {}
+      }
+      rethrow;
     }
-    await tmpFile.rename(metaFile.path);
   }
 
   @override
@@ -99,16 +271,34 @@ class IoAppStorage implements AppStorage {
   ) async {
     await _ensureDirs();
     final ext = _extensionOf(fileName);
+    final relPath = '$_origRelativePrefix$pageId$ext';
     final target = File(p.join(_origDir!.path, '$pageId$ext'));
-    await target.writeAsBytes(bytes, flush: true);
-    return target.path;
+    final tmp = File(p.join(_origDir!.path, '.tmp_$pageId.${++_tmpSeq}$ext'));
+    try {
+      await tmp.writeAsBytes(bytes, flush: true);
+      if (await target.exists()) {
+        await target.delete();
+      }
+      await tmp.rename(target.path);
+    } catch (_) {
+      if (await tmp.exists()) {
+        try {
+          await tmp.delete();
+        } catch (_) {}
+      }
+      rethrow;
+    }
+    return relPath;
   }
 
   @override
   Future<Uint8List> readSourceBytes(String sourceUri) async {
     try {
-      final file = _resolveFile(sourceUri);
-      final bytes = await file.readAsBytes();
+      final resolved = await _resolveExistingSource(sourceUri);
+      if (resolved == null) {
+        throw StateError('图片无法解析：原图不存在');
+      }
+      final bytes = await resolved.file.readAsBytes();
       if (bytes.isEmpty) {
         throw StateError('图片无法解析：原图为空');
       }
@@ -121,9 +311,9 @@ class IoAppStorage implements AppStorage {
   @override
   Future<void> deleteSource(String sourceUri) async {
     try {
-      final file = _resolveFile(sourceUri);
-      if (await file.exists()) {
-        await file.delete();
+      final resolved = await _resolveExistingSource(sourceUri);
+      if (resolved != null && await resolved.file.exists()) {
+        await resolved.file.delete();
       }
     } catch (_) {
       // 删除失败不阻断主流程
@@ -132,6 +322,7 @@ class IoAppStorage implements AppStorage {
 
   @override
   Future<CachedRenderEntry?> findCached(String key) async {
+    if (!_validKeyRe.hasMatch(key)) return null;
     try {
       await _ensureDirs();
       final prefix = 'cache_${key}_';
@@ -143,6 +334,11 @@ class IoAppStorage implements AppStorage {
         if (match == null) continue;
         final bytes = await entity.readAsBytes();
         if (bytes.isEmpty) continue;
+        try {
+          await entity.setLastModified(DateTime.now());
+        } catch (_) {
+          // Ignore mtime touch failure.
+        }
         return CachedRenderEntry(
           bytes: bytes,
           width: int.tryParse(match.group(2)!) ?? 0,
@@ -164,15 +360,35 @@ class IoAppStorage implements AppStorage {
     int width,
     int height,
   ) async {
-    if (!RegExp(r'^[a-z0-9]{1,32}$', caseSensitive: false).hasMatch(key)) {
+    if (!_validKeyRe.hasMatch(key) || bytes.isEmpty) {
       return;
     }
-    if (bytes.isEmpty) return;
     await _ensureDirs();
     final safeW = width < 1 ? 1 : width;
     final safeH = height < 1 ? 1 : height;
-    final file = File(p.join(_cacheRenderDir!.path, 'cache_${key}_${safeW}x$safeH.$ext'));
-    await file.writeAsBytes(bytes, flush: true);
+    final safeExt = ext.toLowerCase() == 'png' ? 'png' : 'jpg';
+    final target = File(
+      p.join(_cacheRenderDir!.path, 'cache_${key}_${safeW}x$safeH.$safeExt'),
+    );
+    final tmp = File(
+      p.join(_cacheRenderDir!.path, '.tmp_${key}_${++_tmpSeq}.$safeExt'),
+    );
+    try {
+      await tmp.writeAsBytes(bytes, flush: true);
+      if (await target.exists()) {
+        try {
+          await target.delete();
+        } catch (_) {}
+      }
+      await tmp.rename(target.path);
+    } catch (_) {
+      if (await tmp.exists()) {
+        try {
+          await tmp.delete();
+        } catch (_) {}
+      }
+      rethrow;
+    }
   }
 
   @override
@@ -182,6 +398,8 @@ class IoAppStorage implements AppStorage {
       final entries = <({File file, DateTime modified})>[];
       await for (final entity in _cacheRenderDir!.list()) {
         if (entity is! File) continue;
+        final name = p.basename(entity.path);
+        if (!_cacheNameRe.hasMatch(name)) continue;
         final stat = await entity.stat();
         entries.add((file: entity, modified: stat.modified));
       }
@@ -198,11 +416,52 @@ class IoAppStorage implements AppStorage {
     }
   }
 
+  Future<void> _pruneExportDirs() async {
+    try {
+      final cutoff = DateTime.now().subtract(const Duration(minutes: 30));
+      final dirs = <({Directory dir, DateTime modified})>[];
+      await for (final entity in _exportDir!.list()) {
+        if (entity is File) {
+          final stat = await entity.stat();
+          if (stat.modified.isBefore(cutoff)) {
+            try {
+              await entity.delete();
+            } catch (_) {}
+          }
+        } else if (entity is Directory) {
+          final stat = await entity.stat();
+          dirs.add((dir: entity, modified: stat.modified));
+        }
+      }
+      dirs.sort((a, b) => b.modified.compareTo(a.modified));
+      for (var i = 0; i < dirs.length; i++) {
+        final item = dirs[i];
+        if (i >= 10 || item.modified.isBefore(cutoff)) {
+          try {
+            await item.dir.delete(recursive: true);
+          } catch (_) {}
+        }
+      }
+    } catch (_) {
+      // Ignore cleanup failures.
+    }
+  }
+
   @override
   Future<String?> writeExportTempFile(Uint8List bytes, String fileName) async {
     await _ensureDirs();
-    final file = File(p.join(_exportDir!.path, fileName));
+    final cleanName = p.basename(fileName).isNotEmpty ? p.basename(fileName) : 'export.bin';
+    final shareDir = Directory(
+      p.join(
+        _exportDir!.path,
+        'share_${DateTime.now().millisecondsSinceEpoch}_${++_tmpSeq}',
+      ),
+    );
+    await shareDir.create(recursive: true);
+    final file = File(p.join(shareDir.path, cleanName));
     await file.writeAsBytes(bytes, flush: true);
+    // Clean up older staging directories asynchronously after writing the current one.
+    Future<void>.microtask(_pruneExportDirs);
     return file.path;
   }
 }

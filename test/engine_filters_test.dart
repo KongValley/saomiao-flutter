@@ -43,6 +43,8 @@ void main() {
       expect((out - v).abs() <= 1, isTrue);
     }
     expect(toGray(Uint8List.fromList([255, 255, 255, 255]), 1, 1)[0], 255);
+    // 透明黑色像素按白底预合成，输出应为纯白 255 而非 0
+    expect(toGray(Uint8List.fromList([0, 0, 0, 0]), 1, 1)[0], 255);
   });
 
   test('histogram 与 otsuThreshold', () {
@@ -58,6 +60,13 @@ void main() {
     bimodal.fillRange(500, 1000, 220);
     final t = otsuThreshold(histogram(bimodal));
     expect(t >= 20 && t < 220, isTrue);
+
+    // 仅含 0 与 255 时中点阈值落在 (0, 255) 区间内
+    final pureBw = Uint8List(200);
+    pureBw.fillRange(0, 50, 0);
+    pureBw.fillRange(50, 200, 255);
+    final bwT = otsuThreshold(histogram(pureBw));
+    expect(bwT > 0 && bwT < 255, isTrue);
     expect(otsuThreshold(Uint32List(256)), 128);
   });
 

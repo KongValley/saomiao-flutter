@@ -376,14 +376,6 @@ bool _isConvex(List<List<double>> quad) {
   return (corners: corners, confidence: conf);
 }
 
-Uint8List _rgbaToGrayDetect(Uint8List rgba, int n) {
-  final gray = Uint8List(n);
-  for (var i = 0, p = 0; i < n; i++, p += 4) {
-    gray[i] = (77 * rgba[p] + 150 * rgba[p + 1] + 29 * rgba[p + 2]) >> 8;
-  }
-  return gray;
-}
-
 /// 检测四角（返回原图归一化坐标）
 DetectCornersResult detectCornersFromRgba(RgbaSource? source) {
   if (source == null || source.data.isEmpty) {
@@ -405,7 +397,7 @@ DetectCornersResult detectCornersFromRgba(RgbaSource? source) {
   final n = w * h;
 
   final smallRgba = resizeImage(source.data, srcW, srcH, 4, w, h).data;
-  final gray = _rgbaToGrayDetect(smallRgba, n);
+  final gray = toGray(smallRgba, w, h);
 
   if (w < 24 || h < 24) {
     return DetectCornersResult(

@@ -129,5 +129,29 @@ void main() {
       }).corners,
       isNull,
     );
+
+    // 内凹四边形与交叉（蝴蝶结）四边形必须拒绝
+    expect(
+      normalizeOptions(<String, Object?>{
+        'corners': [
+          [0.0, 0.0],
+          [1.0, 0.0],
+          [0.2, 0.2],
+          [0.0, 1.0],
+        ],
+      }).corners,
+      isNull,
+    );
+    expect(
+      normalizeOptions(<String, Object?>{
+        'corners': [
+          [0.0, 0.0],
+          [1.0, 1.0],
+          [1.0, 0.0],
+          [0.0, 1.0],
+        ],
+      }).corners,
+      isNull,
+    );
   });
 }

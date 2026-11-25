@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../../engine/options.dart';
@@ -68,9 +70,13 @@ class StyleSheetContent extends StatelessWidget {
                 color: AppColors.inkMuted,
               ),
             ),
-            Text(
-              paperDisabled ? '仅灰度 / 彩色模式有效' : '调整纸面色温',
-              style: const TextStyle(fontSize: 13, color: AppColors.inkMuted),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                paperDisabled ? '仅灰度 / 彩色模式有效' : '调整纸面色温',
+                textAlign: TextAlign.end,
+                style: const TextStyle(fontSize: 13, color: AppColors.inkMuted),
+              ),
             ),
           ],
         ),
@@ -107,7 +113,7 @@ class StyleSheetContent extends StatelessWidget {
         const SizedBox(height: 10),
         LayoutBuilder(
           builder: (context, constraints) {
-            final cardWidth = (constraints.maxWidth - 10) / 2;
+            final cardWidth = math.max(0.0, (constraints.maxWidth - 10) / 2);
             return Wrap(
               spacing: 10,
               runSpacing: 10,

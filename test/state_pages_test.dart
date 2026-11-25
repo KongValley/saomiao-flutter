@@ -59,6 +59,13 @@ void main() {
     expect(restored.pages[0].options.rotate, 90);
     expect(restored.pages[1].options.mode, ScanMode.bw);
     expect(restored.pages[1].options.corners, _corners);
+
+    // 仅恢复风格字段时保留后继旋转/四角修改
+    final patchMap = {for (final p in before.pages) p.id: p.options.toStylePatch()};
+    final modifiedGeo = applied.rotatePage('pg_b');
+    final restoredStyleOnly = modifiedGeo.restoreStylePatches(patchMap);
+    expect(restoredStyleOnly.pages[1].options.mode, ScanMode.bw);
+    expect(restoredStyleOnly.pages[1].options.rotate, 90);
   });
 
   test('movePage / removePage / rotatePage / dragTargetIndex', () {

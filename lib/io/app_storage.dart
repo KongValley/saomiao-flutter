@@ -103,6 +103,10 @@ class MemoryAppStorage implements AppStorage {
     int width,
     int height,
   ) async {
+    if (!RegExp(r'^[a-z0-9]{1,64}$', caseSensitive: false).hasMatch(key)) {
+      return;
+    }
+    if (bytes.isEmpty) return;
     _cache[key] = (
       entry: CachedRenderEntry(
         bytes: bytes,

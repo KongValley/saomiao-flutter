@@ -14,23 +14,27 @@ const int kMaxSourcePixels = 20000000; // 20MP
 /// 仅探测头部宽高，避免大图直接 OOM
 ({int width, int height})? probeSizeSync(Uint8List bytes) {
   if (bytes.isEmpty) return null;
-  final decoder = img.findDecoderForData(bytes);
-  if (decoder == null) return null;
-  final info = decoder.startDecode(bytes);
-  if (info == null || info.width <= 0 || info.height <= 0) return null;
-  // 若有 EXIF 旋转 90/270 度，交换视觉宽高
-  var w = info.width;
-  var h = info.height;
-  if (decoder is img.JpegDecoder) {
-    final exif = img.decodeJpgExif(bytes);
-    final orient = exif?.imageIfd.orientation;
-    if (orient != null && orient >= 5 && orient <= 8) {
-      final tmp = w;
-      w = h;
-      h = tmp;
+  try {
+    final decoder = img.findDecoderForData(bytes);
+    if (decoder == null) return null;
+    final info = decoder.startDecode(bytes);
+    if (info == null || info.width <= 0 || info.height <= 0) return null;
+    // 若有 EXIF 旋转 90/270 度，交换视觉宽高
+    var w = info.width;
+    var h = info.height;
+    if (decoder is img.JpegDecoder) {
+      final exif = img.decodeJpgExif(bytes);
+      final orient = exif?.imageIfd.orientation;
+      if (orient != null && orient >= 5 && orient <= 8) {
+        final tmp = w;
+        w = h;
+        h = tmp;
+      }
     }
+    return (width: w, height: h);
+  } catch (_) {
+    return null;
   }
-  return (width: w, height: h);
 }
 
 Future<({int width, int height})?> probeImageSize(Uint8List bytes) async {
@@ -39,8 +43,22 @@ Future<({int width, int height})?> probeImageSize(Uint8List bytes) async {
   return probePlatformSizeFallback(bytes);
 }
 
+({int width, int height}) fitMaxPixelsSize(int width, int height, int maxPixels) {
+  final pixels = width * height;
+  if (pixels <= maxPixels || width <= 0 || height <= 0) {
+    return (width: width, height: height);
+  }
+  final longEdge = math.max(width, height);
+  final targetLong = math.max(1, (longEdge * math.sqrt(maxPixels / pixels)).floor());
+  final scale = targetLong / longEdge;
+  return (
+    width: math.max(1, (width * scale).round()),
+    height: math.max(1, (height * scale).round()),
+  );
+}
+
 /// 纯 Dart 解码（支持 JPEG/PNG/WebP/BMP/GIF/TIFF + EXIF 摆正），在 Isolate 中可安全运行
-RgbaSource? decodeBytesPureDart(Uint8List bytes) {
+RgbaSource? decodeBytesPureDart(Uint8List bytes, {int? maxPixels}) {
   if (bytes.isEmpty) {
     throw StateError('图片数据为空或无法读取');
   }
@@ -53,8 +71,21 @@ RgbaSource? decodeBytesPureDart(Uint8List bytes) {
   if (decoder == null) return null;
   final raw = decoder.decode(bytes);
   if (raw == null || raw.width <= 0 || raw.height <= 0) return null;
+  if (raw.width * raw.height > kHardLimitPixels) {
+    throw StateError('图片过大：请先压缩后再导入');
+  }
 
   var oriented = img.bakeOrientation(raw);
+  if (maxPixels != null && oriented.width * oriented.height > maxPixels) {
+    final target = fitMaxPixelsSize(oriented.width, oriented.height, maxPixels);
+    oriented = img.copyResize(
+      oriented,
+      width: target.width,
+      height: target.height,
+      interpolation: img.Interpolation.average,
+    );
+  }
+
   if (oriented.format != img.Format.uint8 || oriented.hasPalette || oriented.numChannels != 4) {
     oriented = oriented.convert(
       format: img.Format.uint8,
@@ -72,11 +103,14 @@ RgbaSource? decodeBytesPureDart(Uint8List bytes) {
 }
 
 /// 跨平台解码：优先纯 Dart（Isolate 可用），不支持格式（如 HEIC）回退到 Flutter 引擎编解码器
-Future<RgbaSource> decodeImageBytes(Uint8List bytes) async {
-  final pure = decodeBytesPureDart(bytes);
+Future<RgbaSource> decodeImageBytes(
+  Uint8List bytes, {
+  int? maxPixels = kMaxSourcePixels,
+}) async {
+  final pure = decodeBytesPureDart(bytes, maxPixels: maxPixels);
   if (pure != null) return pure;
 
-  final fallback = await decodePlatformImageFallback(bytes);
+  final fallback = await decodePlatformImageFallback(bytes, maxPixels: maxPixels);
   if (fallback != null) {
     if (fallback.width * fallback.height > kHardLimitPixels) {
       throw StateError('图片过大：请先压缩后再导入');
@@ -90,12 +124,8 @@ Future<RgbaSource> decodeImageBytes(Uint8List bytes) async {
 RgbaSource downscaleIfNeeded(RgbaSource src, int maxPixels) {
   final pixels = src.width * src.height;
   if (pixels <= maxPixels) return src;
-  final longEdge = math.max(src.width, src.height);
-  final targetLong = math.max(1, (longEdge * math.sqrt(maxPixels / pixels)).floor());
-  final scale = targetLong / longEdge;
-  final tw = math.max(1, (src.width * scale).round());
-  final th = math.max(1, (src.height * scale).round());
-  final resized = resizeImage(src.data, src.width, src.height, 4, tw, th);
+  final target = fitMaxPixelsSize(src.width, src.height, maxPixels);
+  final resized = resizeImage(src.data, src.width, src.height, 4, target.width, target.height);
   return RgbaSource(data: resized.data, width: resized.width, height: resized.height);
 }
 

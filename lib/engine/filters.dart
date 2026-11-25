@@ -10,12 +10,50 @@ int clamp255(num v) {
   return v.toInt();
 }
 
-/// RGBA → 灰度（BT.601 定点权重：77/150/29）
+/// 将透明/半透明 RGBA 像素按白底预合成（全部不透明时直接原样返回）
+Uint8List compositeWhiteRgba(Uint8List rgba, int n) {
+  var hasAlpha = false;
+  for (var i = 0, p = 3; i < n; i++, p += 4) {
+    if (rgba[p] != 255) {
+      hasAlpha = true;
+      break;
+    }
+  }
+  if (!hasAlpha) return rgba;
+  final out = Uint8List(n * 4);
+  for (var i = 0, p = 0; i < n; i++, p += 4) {
+    final a = rgba[p + 3];
+    if (a == 255) {
+      out[p] = rgba[p];
+      out[p + 1] = rgba[p + 1];
+      out[p + 2] = rgba[p + 2];
+      out[p + 3] = 255;
+    } else {
+      final inv = 255 - a;
+      out[p] = (rgba[p] * a + 255 * inv + 127) ~/ 255;
+      out[p + 1] = (rgba[p + 1] * a + 255 * inv + 127) ~/ 255;
+      out[p + 2] = (rgba[p + 2] * a + 255 * inv + 127) ~/ 255;
+      out[p + 3] = 255;
+    }
+  }
+  return out;
+}
+
+/// RGBA → 灰度（BT.601 定点权重：77/150/29，透明像素按白底合成）
 Uint8List toGray(Uint8List rgba, int w, int h) {
   final n = w * h;
   final gray = Uint8List(n);
   for (var i = 0, p = 0; i < n; i++, p += 4) {
-    gray[i] = (77 * rgba[p] + 150 * rgba[p + 1] + 29 * rgba[p + 2] + 128) >> 8;
+    final a = rgba[p + 3];
+    if (a == 255) {
+      gray[i] = (77 * rgba[p] + 150 * rgba[p + 1] + 29 * rgba[p + 2] + 128) >> 8;
+    } else {
+      final inv = 255 - a;
+      final r = (rgba[p] * a + 255 * inv + 127) ~/ 255;
+      final g = (rgba[p + 1] * a + 255 * inv + 127) ~/ 255;
+      final b = (rgba[p + 2] * a + 255 * inv + 127) ~/ 255;
+      gray[i] = (77 * r + 150 * g + 29 * b + 128) >> 8;
+    }
   }
   return gray;
 }
@@ -29,7 +67,7 @@ Uint32List histogram(Uint8List gray) {
   return hist;
 }
 
-/// 大津法（Otsu）全局阈值
+/// 大津法（Otsu）全局阈值（并列最大类间方差时取区间中点）
 int otsuThreshold(Uint32List hist) {
   var total = 0;
   var sum = 0;
@@ -40,7 +78,8 @@ int otsuThreshold(Uint32List hist) {
   if (total == 0) return 128;
   var sumB = 0;
   var wB = 0;
-  var best = 128;
+  var firstBest = 128;
+  var lastBest = 128;
   var maxVar = -1.0;
   for (var t = 0; t < 256; t++) {
     wB += hist[t];
@@ -52,12 +91,16 @@ int otsuThreshold(Uint32List hist) {
     final mF = (sum - sumB) / wF;
     final d = mB - mF;
     final between = wB * wF * d * d;
-    if (between > maxVar) {
+    if (between > maxVar + 1e-6) {
       maxVar = between;
-      best = t;
+      firstBest = t;
+      lastBest = t;
+    } else if (maxVar >= 0 && (between - maxVar).abs() <= 1e-6) {
+      lastBest = t;
     }
   }
-  return best;
+  if (maxVar < 0) return 128;
+  return (firstBest + lastBest) >> 1;
 }
 
 class FloatGrid {
@@ -72,27 +115,60 @@ class FloatGrid {
   final int height;
 }
 
+const int _kFilterChunkPixels = 16384;
+
+void _downsampleGridRow(
+  Uint8List gray,
+  int w,
+  int h,
+  int dw,
+  int dh,
+  Float32List out,
+  int y,
+) {
+  final y0 = (y * h) ~/ dh;
+  final y1 = math.min(h, math.max(y0 + 1, ((y + 1) * h) ~/ dh));
+  for (var x = 0; x < dw; x++) {
+    final x0 = (x * w) ~/ dw;
+    final x1 = math.min(w, math.max(x0 + 1, ((x + 1) * w) ~/ dw));
+    var sum = 0;
+    var cnt = 0;
+    for (var yy = y0; yy < y1; yy++) {
+      final base = yy * w;
+      for (var xx = x0; xx < x1; xx++) {
+        sum += gray[base + xx];
+        cnt++;
+      }
+    }
+    out[y * dw + x] = cnt > 0 ? sum / cnt : 0.0;
+  }
+}
+
 /// 平均池化降采样（用于背景场估计 / 倾角检测）
 FloatGrid downsampleGrid(Uint8List gray, int w, int h, num factor) {
   final dw = math.max(1, (w / factor).round());
   final dh = math.max(1, (h / factor).round());
   final out = Float32List(dw * dh);
   for (var y = 0; y < dh; y++) {
-    final y0 = (y * h) ~/ dh;
-    final y1 = math.min(h, math.max(y0 + 1, ((y + 1) * h) ~/ dh));
-    for (var x = 0; x < dw; x++) {
-      final x0 = (x * w) ~/ dw;
-      final x1 = math.min(w, math.max(x0 + 1, ((x + 1) * w) ~/ dw));
-      var sum = 0;
-      var cnt = 0;
-      for (var yy = y0; yy < y1; yy++) {
-        final base = yy * w;
-        for (var xx = x0; xx < x1; xx++) {
-          sum += gray[base + xx];
-          cnt++;
-        }
-      }
-      out[y * dw + x] = cnt > 0 ? sum / cnt : 0.0;
+    _downsampleGridRow(gray, w, h, dw, dh, out, y);
+  }
+  return FloatGrid(data: out, width: dw, height: dh);
+}
+
+Future<FloatGrid> downsampleGridAsync(
+  Uint8List gray,
+  int w,
+  int h,
+  num factor, {
+  required Future<void> Function() maybeYield,
+}) async {
+  final dw = math.max(1, (w / factor).round());
+  final dh = math.max(1, (h / factor).round());
+  final out = Float32List(dw * dh);
+  for (var y = 0; y < dh; y++) {
+    _downsampleGridRow(gray, w, h, dw, dh, out, y);
+    if ((y & 31) == 31) {
+      await maybeYield();
     }
   }
   return FloatGrid(data: out, width: dw, height: dh);
@@ -184,12 +260,58 @@ class BackgroundField {
   final int factor;
 }
 
-/// 估计纸面背景照度场
-BackgroundField? makeBackgroundField(Uint8List gray, int w, int h, num shadow) {
+({double strength, int factor})? _backgroundSpec(num shadow) {
   final strength = (shadow.toDouble() / 100.0).clamp(0.0, 1.0);
   if (strength <= 0) return null;
   final factor = (8 + strength * 6).round();
-  final small = downsampleGrid(gray, w, h, factor);
+  return (strength: strength, factor: factor);
+}
+
+void _upsampleBackgroundRow(
+  Float32List smooth,
+  int sw,
+  int sh,
+  Uint8List field,
+  int w,
+  int h,
+  double fx,
+  double fy,
+  int y,
+) {
+  var sy = (y + 0.5) * fy - 0.5;
+  if (sy < 0) {
+    sy = 0;
+  } else if (sy > sh - 1) {
+    sy = (sh - 1).toDouble();
+  }
+  final y0 = sy.toInt();
+  final wy = sy - y0;
+  final y1 = y0 + 1 < sh ? y0 + 1 : y0;
+  final row0 = y0 * sw;
+  final row1 = y1 * sw;
+  final row = y * w;
+  for (var x = 0; x < w; x++) {
+    var sx = (x + 0.5) * fx - 0.5;
+    if (sx < 0) {
+      sx = 0;
+    } else if (sx > sw - 1) {
+      sx = (sw - 1).toDouble();
+    }
+    final x0 = sx.toInt();
+    final wx = sx - x0;
+    final x1 = x0 + 1 < sw ? x0 + 1 : x0;
+    final top = smooth[row0 + x0] * (1 - wx) + smooth[row0 + x1] * wx;
+    final bot = smooth[row1 + x0] * (1 - wx) + smooth[row1 + x1] * wx;
+    final v = top * (1 - wy) + bot * wy;
+    field[row + x] = v <= 1 ? 1 : (v >= 255 ? 255 : v.toInt());
+  }
+}
+
+/// 估计纸面背景照度场
+BackgroundField? makeBackgroundField(Uint8List gray, int w, int h, num shadow) {
+  final spec = _backgroundSpec(shadow);
+  if (spec == null) return null;
+  final small = downsampleGrid(gray, w, h, spec.factor);
   final sw = small.width;
   final sh = small.height;
   var dilated = small.data;
@@ -204,41 +326,46 @@ BackgroundField? makeBackgroundField(Uint8List gray, int w, int h, num shadow) {
   final fx = sw / w;
   final fy = sh / h;
   for (var y = 0; y < h; y++) {
-    var sy = (y + 0.5) * fy - 0.5;
-    if (sy < 0) {
-      sy = 0;
-    } else if (sy > sh - 1) {
-      sy = (sh - 1).toDouble();
-    }
-    final y0 = sy.toInt();
-    final wy = sy - y0;
-    final y1 = y0 + 1 < sh ? y0 + 1 : y0;
-    final row0 = y0 * sw;
-    final row1 = y1 * sw;
-    final row = y * w;
-    for (var x = 0; x < w; x++) {
-      var sx = (x + 0.5) * fx - 0.5;
-      if (sx < 0) {
-        sx = 0;
-      } else if (sx > sw - 1) {
-        sx = (sw - 1).toDouble();
-      }
-      final x0 = sx.toInt();
-      final wx = sx - x0;
-      final x1 = x0 + 1 < sw ? x0 + 1 : x0;
-      final top = smooth[row0 + x0] * (1 - wx) + smooth[row0 + x1] * wx;
-      final bot = smooth[row1 + x0] * (1 - wx) + smooth[row1 + x1] * wx;
-      final v = top * (1 - wy) + bot * wy;
-      field[row + x] = v <= 1 ? 1 : (v >= 255 ? 255 : v.toInt());
-    }
+    _upsampleBackgroundRow(smooth, sw, sh, field, w, h, fx, fy, y);
   }
-  return BackgroundField(data: field, strength: strength, factor: factor);
+  return BackgroundField(data: field, strength: spec.strength, factor: spec.factor);
 }
 
-/// 背景除法压白：v' = v / bg * 255，再按 strength 与原始像素混合
-Uint8List removeShadowGray(Uint8List gray, Uint8List bg, double strength) {
+Future<BackgroundField?> makeBackgroundFieldAsync(
+  Uint8List gray,
+  int w,
+  int h,
+  num shadow, {
+  required Future<void> Function() maybeYield,
+}) async {
+  final spec = _backgroundSpec(shadow);
+  if (spec == null) return null;
+  final small = await downsampleGridAsync(gray, w, h, spec.factor, maybeYield: maybeYield);
+  final sw = small.width;
+  final sh = small.height;
+  var dilated = small.data;
+  for (var p = 0; p < 2; p++) {
+    dilated = maxFilter(dilated, sw, sh, 2);
+    await maybeYield();
+  }
+  final radius = math.max(2, (math.min(sw, sh) / 32).round());
+  final smooth = boxBlurFloat(dilated, sw, sh, radius, 2);
+  await maybeYield();
+
+  final field = Uint8List(w * h);
+  final fx = sw / w;
+  final fy = sh / h;
+  for (var y = 0; y < h; y++) {
+    _upsampleBackgroundRow(smooth, sw, sh, field, w, h, fx, fy, y);
+    if ((y & 31) == 31) {
+      await maybeYield();
+    }
+  }
+  return BackgroundField(data: field, strength: spec.strength, factor: spec.factor);
+}
+
+({double eff, double darkGate}) _computeRemoveShadowParams(Uint8List gray, double strength) {
   final n = gray.length;
-  final out = Uint8List(n);
   final s = strength.clamp(0.0, 1.0);
   final eff = 1.0 - math.pow(1.0 - s, 3);
   final hist = Uint32List(256);
@@ -259,8 +386,19 @@ Uint8List removeShadowGray(Uint8List gray, Uint8List bg, double strength) {
     cntTop += hist[v];
   }
   final paperLevel = cntTop > 0 ? sumTop / cntTop : 200.0;
-  final darkGate = paperLevel * 0.5;
-  for (var i = 0; i < n; i++) {
+  return (eff: eff, darkGate: paperLevel * 0.5);
+}
+
+void _removeShadowRange(
+  Uint8List gray,
+  Uint8List bg,
+  Uint8List out,
+  double eff,
+  double darkGate,
+  int start,
+  int end,
+) {
+  for (var i = start; i < end; i++) {
     var b = bg[i];
     if (b < 10) b = 10;
     final maxGain = b >= 60 ? 2.8 : 1.2 + (b / 60.0) * 1.6;
@@ -274,6 +412,34 @@ Uint8List removeShadowGray(Uint8List gray, Uint8List bg, double strength) {
       if (o > liftCap) o = liftCap;
     }
     out[i] = clamp255(o);
+  }
+}
+
+/// 背景除法压白：v' = v / bg * 255，再按 strength 与原始像素混合
+Uint8List removeShadowGray(Uint8List gray, Uint8List bg, double strength) {
+  final n = gray.length;
+  final out = Uint8List(n);
+  final params = _computeRemoveShadowParams(gray, strength);
+  _removeShadowRange(gray, bg, out, params.eff, params.darkGate, 0, n);
+  return out;
+}
+
+Future<Uint8List> removeShadowGrayAsync(
+  Uint8List gray,
+  Uint8List bg,
+  double strength, {
+  required Future<void> Function() maybeYield,
+}) async {
+  final n = gray.length;
+  final out = Uint8List(n);
+  final params = _computeRemoveShadowParams(gray, strength);
+  await maybeYield();
+  for (var start = 0; start < n; start += _kFilterChunkPixels) {
+    final end = math.min(n, start + _kFilterChunkPixels);
+    _removeShadowRange(gray, bg, out, params.eff, params.darkGate, start, end);
+    if (end < n) {
+      await maybeYield();
+    }
   }
   return out;
 }
@@ -318,25 +484,20 @@ List<double> estimateWhiteBalance(Uint8List rgba, Uint8List gray, int w, int h) 
 
 const double _defaultSatBoost = 1.18;
 
-/// 彩色增强（单遍完成）：背景除法 → 白平衡 → 饱和度提升 → 曲线 LUT
-Uint8List enhanceColor(
+void _enhanceColorRange(
   Uint8List rgba,
-  int w,
-  int h,
+  Uint8List out,
   Uint8List? bg,
-  double strength,
-  List<double> wb,
-  Uint8List lut, [
-  double sat = _defaultSatBoost,
-]) {
-  final n = w * h;
-  final out = Uint8List(n * 4);
-  final s = strength.clamp(0.0, 1.0);
-  final eff = bg != null ? 1.0 - math.pow(1.0 - s, 3) : 0.0;
-  final wr = wb[0];
-  final wg = wb[1];
-  final wb2 = wb[2];
-  for (var i = 0, p = 0; i < n; i++, p += 4) {
+  double eff,
+  double wr,
+  double wg,
+  double wb2,
+  Uint8List lut,
+  double sat,
+  int start,
+  int end,
+) {
+  for (var i = start, p = start * 4; i < end; i++, p += 4) {
     var r = rgba[p].toDouble();
     var g = rgba[p + 1].toDouble();
     var b = rgba[p + 2].toDouble();
@@ -363,49 +524,146 @@ Uint8List enhanceColor(
     out[p + 2] = lut[b <= 0 ? 0 : (b >= 255 ? 255 : b.toInt())];
     out[p + 3] = rgba[p + 3];
   }
+}
+
+/// 彩色增强（单遍完成）：背景除法 → 白平衡 → 饱和度提升 → 曲线 LUT
+Uint8List enhanceColor(
+  Uint8List rgba,
+  int w,
+  int h,
+  Uint8List? bg,
+  double strength,
+  List<double> wb,
+  Uint8List lut, [
+  double sat = _defaultSatBoost,
+]) {
+  final n = w * h;
+  final out = Uint8List(n * 4);
+  final s = strength.clamp(0.0, 1.0);
+  final eff = bg != null ? 1.0 - math.pow(1.0 - s, 3) : 0.0;
+  _enhanceColorRange(rgba, out, bg, eff, wb[0], wb[1], wb[2], lut, sat, 0, n);
   return out;
+}
+
+Future<Uint8List> enhanceColorAsync(
+  Uint8List rgba,
+  int w,
+  int h,
+  Uint8List? bg,
+  double strength,
+  List<double> wb,
+  Uint8List lut, {
+  double sat = _defaultSatBoost,
+  required Future<void> Function() maybeYield,
+}) async {
+  final n = w * h;
+  final out = Uint8List(n * 4);
+  final s = strength.clamp(0.0, 1.0);
+  final eff = bg != null ? 1.0 - math.pow(1.0 - s, 3) : 0.0;
+  final wr = wb[0];
+  final wg = wb[1];
+  final wb2 = wb[2];
+  for (var start = 0; start < n; start += _kFilterChunkPixels) {
+    final end = math.min(n, start + _kFilterChunkPixels);
+    _enhanceColorRange(rgba, out, bg, eff, wr, wg, wb2, lut, sat, start, end);
+    if (end < n) {
+      await maybeYield();
+    }
+  }
+  return out;
+}
+
+void _medianCrossRow(
+  Uint8List src,
+  Uint8List out,
+  int w,
+  int y,
+  double wm,
+  double keep,
+) {
+  final row = y * w;
+  for (var x = 1; x < w - 1; x++) {
+    final i = row + x;
+    var a = src[i - 1];
+    var b = src[i + 1];
+    var c = src[i - w];
+    var d = src[i + w];
+    final center = src[i];
+    var e = center;
+    int t;
+    if (a > b) { t = a; a = b; b = t; }
+    if (d > e) { t = d; d = e; e = t; }
+    if (c > e) { t = c; c = e; e = t; }
+    if (c > d) { t = c; c = d; d = t; }
+    if (a > d) { t = a; a = d; d = t; }
+    if (a > c) { t = a; a = c; c = t; }
+    if (b > e) { t = b; b = e; e = t; }
+    if (b > d) { t = b; b = d; d = t; }
+    if (b > c) { t = b; b = c; c = t; }
+    out[i] = clamp255(c * wm + center * keep + 0.5);
+  }
 }
 
 /// 5 值中值（十字窗口）+ 权重混合；9 比较器排序网络
 Uint8List _medianCross(Uint8List src, int w, int h, double weight) {
   final out = Uint8List.fromList(src);
   final keep = 1.0 - weight;
-  final wm = weight;
   for (var y = 1; y < h - 1; y++) {
-    final row = y * w;
-    for (var x = 1; x < w - 1; x++) {
-      final i = row + x;
-      var a = src[i - 1];
-      var b = src[i + 1];
-      var c = src[i - w];
-      var d = src[i + w];
-      final center = src[i];
-      var e = center;
-      int t;
-      if (a > b) { t = a; a = b; b = t; }
-      if (d > e) { t = d; d = e; e = t; }
-      if (c > e) { t = c; c = e; e = t; }
-      if (c > d) { t = c; c = d; d = t; }
-      if (a > d) { t = a; a = d; d = t; }
-      if (a > c) { t = a; a = c; c = t; }
-      if (b > e) { t = b; b = e; e = t; }
-      if (b > d) { t = b; b = d; d = t; }
-      if (b > c) { t = b; b = c; c = t; }
-      out[i] = clamp255(c * wm + center * keep + 0.5);
+    _medianCrossRow(src, out, w, y, weight, keep);
+  }
+  return out;
+}
+
+Future<Uint8List> _medianCrossAsync(
+  Uint8List src,
+  int w,
+  int h,
+  double weight,
+  Future<void> Function() maybeYield,
+) async {
+  final out = Uint8List.fromList(src);
+  final keep = 1.0 - weight;
+  for (var y = 1; y < h - 1; y++) {
+    _medianCrossRow(src, out, w, y, weight, keep);
+    if ((y & 31) == 31) {
+      await maybeYield();
     }
   }
   return out;
 }
 
-/// 降噪：十字窗口中值 + 权重混合
-Uint8List denoiseGray(Uint8List gray, int w, int h, num denoise) {
+({int passes, double weight})? _denoiseSpec(int w, int h, num denoise) {
   final d = denoise.toDouble();
-  if (d <= 0 || w < 3 || h < 3) return gray;
+  if (d <= 0 || w < 3 || h < 3) return null;
   final passes = d >= 70 ? 2 : 1;
   final weight = d >= 70 ? 1.0 : math.min(0.9, d / 90.0);
+  return (passes: passes, weight: weight);
+}
+
+/// 降噪：十字窗口中值 + 权重混合
+Uint8List denoiseGray(Uint8List gray, int w, int h, num denoise) {
+  final spec = _denoiseSpec(w, h, denoise);
+  if (spec == null) return gray;
   var cur = gray;
-  for (var p = 0; p < passes; p++) {
-    cur = _medianCross(cur, w, h, weight);
+  for (var p = 0; p < spec.passes; p++) {
+    cur = _medianCross(cur, w, h, spec.weight);
+  }
+  return cur;
+}
+
+Future<Uint8List> denoiseGrayAsync(
+  Uint8List gray,
+  int w,
+  int h,
+  num denoise, {
+  required Future<void> Function() maybeYield,
+}) async {
+  final spec = _denoiseSpec(w, h, denoise);
+  if (spec == null) return gray;
+  var cur = gray;
+  for (var p = 0; p < spec.passes; p++) {
+    cur = await _medianCrossAsync(cur, w, h, spec.weight, maybeYield);
+    await maybeYield();
   }
   return cur;
 }
@@ -435,29 +693,81 @@ Uint8List applyLutGray(Uint8List gray, Uint8List lut) {
   return gray;
 }
 
+void _gauss3HorizRow(Uint8List src, Uint8List tmp, int w, int y) {
+  final row = y * w;
+  tmp[row] = (src[row] * 3 + src[row + 1] + 2) >> 2;
+  final last = row + w - 1;
+  tmp[last] = (src[last - 1] + src[last] * 3 + 2) >> 2;
+  for (var x = 1; x < w - 1; x++) {
+    tmp[row + x] = (src[row + x - 1] + 2 * src[row + x] + src[row + x + 1] + 2) >> 2;
+  }
+}
+
+void _gauss3VertRow(Uint8List tmp, Uint8List out, int w, int h, int y) {
+  final up = (y > 0 ? y - 1 : 0) * w;
+  final row = y * w;
+  final dn = (y < h - 1 ? y + 1 : h - 1) * w;
+  for (var x = 0; x < w; x++) {
+    out[row + x] = (tmp[up + x] + 2 * tmp[row + x] + tmp[dn + x] + 2) >> 2;
+  }
+}
+
 /// 3x3 高斯（[1,2,1]/4 可分离）
 Uint8List _gauss3(Uint8List src, int w, int h) {
   final n = w * h;
   final tmp = Uint8List(n);
   for (var y = 0; y < h; y++) {
-    final row = y * w;
-    tmp[row] = (src[row] * 3 + src[row + 1] + 2) >> 2;
-    final last = row + w - 1;
-    tmp[last] = (src[last - 1] + src[last] * 3 + 2) >> 2;
-    for (var x = 1; x < w - 1; x++) {
-      tmp[row + x] = (src[row + x - 1] + 2 * src[row + x] + src[row + x + 1] + 2) >> 2;
-    }
+    _gauss3HorizRow(src, tmp, w, y);
   }
   final out = Uint8List(n);
   for (var y = 0; y < h; y++) {
-    final up = (y > 0 ? y - 1 : 0) * w;
-    final row = y * w;
-    final dn = (y < h - 1 ? y + 1 : h - 1) * w;
-    for (var x = 0; x < w; x++) {
-      out[row + x] = (tmp[up + x] + 2 * tmp[row + x] + tmp[dn + x] + 2) >> 2;
-    }
+    _gauss3VertRow(tmp, out, w, h, y);
   }
   return out;
+}
+
+Future<Uint8List> _gauss3Async(
+  Uint8List src,
+  int w,
+  int h,
+  Future<void> Function() maybeYield,
+) async {
+  final n = w * h;
+  final tmp = Uint8List(n);
+  for (var y = 0; y < h; y++) {
+    _gauss3HorizRow(src, tmp, w, y);
+    if ((y & 31) == 31) await maybeYield();
+  }
+  final out = Uint8List(n);
+  for (var y = 0; y < h; y++) {
+    _gauss3VertRow(tmp, out, w, h, y);
+    if ((y & 31) == 31) await maybeYield();
+  }
+  return out;
+}
+
+void _gauss5HorizRow(Uint8List src, Uint8List tmp, int w, int y) {
+  final row = y * w;
+  for (var x = 0; x < w; x++) {
+    final xm2 = x > 1 ? x - 2 : 0;
+    final xm1 = x > 0 ? x - 1 : 0;
+    final xp1 = x < w - 1 ? x + 1 : w - 1;
+    final xp2 = x < w - 2 ? x + 2 : w - 1;
+    tmp[row + x] =
+        (src[row + xm2] + 4 * src[row + xm1] + 6 * src[row + x] + 4 * src[row + xp1] + src[row + xp2] + 8) >> 4;
+  }
+}
+
+void _gauss5VertRow(Uint8List tmp, Uint8List out, int w, int h, int y) {
+  final ym2 = (y > 1 ? y - 2 : 0) * w;
+  final ym1 = (y > 0 ? y - 1 : 0) * w;
+  final row = y * w;
+  final yp1 = (y < h - 1 ? y + 1 : h - 1) * w;
+  final yp2 = (y < h - 2 ? y + 2 : h - 1) * w;
+  for (var x = 0; x < w; x++) {
+    out[row + x] =
+        (tmp[ym2 + x] + 4 * tmp[ym1 + x] + 6 * tmp[row + x] + 4 * tmp[yp1 + x] + tmp[yp2 + x] + 8) >> 4;
+  }
 }
 
 /// 5x5 高斯（[1,4,6,4,1]/16 可分离）
@@ -465,47 +775,91 @@ Uint8List _gauss5(Uint8List src, int w, int h) {
   final n = w * h;
   final tmp = Uint8List(n);
   for (var y = 0; y < h; y++) {
-    final row = y * w;
-    for (var x = 0; x < w; x++) {
-      final xm2 = x > 1 ? x - 2 : 0;
-      final xm1 = x > 0 ? x - 1 : 0;
-      final xp1 = x < w - 1 ? x + 1 : w - 1;
-      final xp2 = x < w - 2 ? x + 2 : w - 1;
-      tmp[row + x] =
-          (src[row + xm2] + 4 * src[row + xm1] + 6 * src[row + x] + 4 * src[row + xp1] + src[row + xp2] + 8) >> 4;
-    }
+    _gauss5HorizRow(src, tmp, w, y);
   }
   final out = Uint8List(n);
   for (var y = 0; y < h; y++) {
-    final ym2 = (y > 1 ? y - 2 : 0) * w;
-    final ym1 = (y > 0 ? y - 1 : 0) * w;
-    final row = y * w;
-    final yp1 = (y < h - 1 ? y + 1 : h - 1) * w;
-    final yp2 = (y < h - 2 ? y + 2 : h - 1) * w;
-    for (var x = 0; x < w; x++) {
-      out[row + x] =
-          (tmp[ym2 + x] + 4 * tmp[ym1 + x] + 6 * tmp[row + x] + 4 * tmp[yp1 + x] + tmp[yp2 + x] + 8) >> 4;
-    }
+    _gauss5VertRow(tmp, out, w, h, y);
   }
   return out;
+}
+
+Future<Uint8List> _gauss5Async(
+  Uint8List src,
+  int w,
+  int h,
+  Future<void> Function() maybeYield,
+) async {
+  final n = w * h;
+  final tmp = Uint8List(n);
+  for (var y = 0; y < h; y++) {
+    _gauss5HorizRow(src, tmp, w, y);
+    if ((y & 31) == 31) await maybeYield();
+  }
+  final out = Uint8List(n);
+  for (var y = 0; y < h; y++) {
+    _gauss5VertRow(tmp, out, w, h, y);
+    if ((y & 31) == 31) await maybeYield();
+  }
+  return out;
+}
+
+double? _sharpenAmount(int w, int h, num sharpen) {
+  final amt = (sharpen.toDouble() / 100.0).clamp(0.0, 1.0);
+  if (amt <= 0 || w < 3 || h < 3) return null;
+  return amt * 1.6;
+}
+
+void _unsharpRange(
+  Uint8List gray,
+  Uint8List blur,
+  Uint8List out,
+  double amount,
+  int start,
+  int end,
+) {
+  for (var i = start; i < end; i++) {
+    final v = gray[i];
+    out[i] = clamp255(v + amount * (v - blur[i]));
+  }
 }
 
 /// unsharp mask 锐化（灰度）
 Uint8List sharpenGray(Uint8List gray, int w, int h, num sharpen) {
-  final amt = (sharpen.toDouble() / 100.0).clamp(0.0, 1.0);
-  if (amt <= 0 || w < 3 || h < 3) return gray;
-  final amount = amt * 1.6;
+  final amount = _sharpenAmount(w, h, sharpen);
+  if (amount == null) return gray;
   final blur = sharpen >= 55 ? _gauss5(gray, w, h) : _gauss3(gray, w, h);
   final n = w * h;
   final out = Uint8List(n);
-  for (var i = 0; i < n; i++) {
-    final v = gray[i];
-    out[i] = clamp255(v + amount * (v - blur[i]));
+  _unsharpRange(gray, blur, out, amount, 0, n);
+  return out;
+}
+
+Future<Uint8List> sharpenGrayAsync(
+  Uint8List gray,
+  int w,
+  int h,
+  num sharpen, {
+  required Future<void> Function() maybeYield,
+}) async {
+  final amount = _sharpenAmount(w, h, sharpen);
+  if (amount == null) return gray;
+  final blur = sharpen >= 55
+      ? await _gauss5Async(gray, w, h, maybeYield)
+      : await _gauss3Async(gray, w, h, maybeYield);
+  final n = w * h;
+  final out = Uint8List(n);
+  for (var start = 0; start < n; start += _kFilterChunkPixels) {
+    final end = math.min(n, start + _kFilterChunkPixels);
+    _unsharpRange(gray, blur, out, amount, start, end);
+    if (end < n) {
+      await maybeYield();
+    }
   }
   return out;
 }
 
-/// 二值化：Sauvola 局部阈值（积分图）与大津法融合，输出纯 0 / 255
+/// 二值化：Sauvola 局部阈值（O(w) 滑动列和窗口，避免整图双 64 位积分图爆内存）与大津法融合，输出纯 0 / 255
 Uint8List binarizeGray(
   Uint8List gray,
   int w,
@@ -513,59 +867,151 @@ Uint8List binarizeGray(
   num thresholdParam, {
   bool suppressFlatBackground = false,
 }) {
-  final n = w * h;
-  final hist = histogram(gray);
-  var sumAll = 0;
-  for (var i = 0; i < 256; i++) {
-    sumAll += i * hist[i];
-  }
-  final meanGlobal = sumAll / n;
-  var otsu = otsuThreshold(hist);
-  if (otsu > meanGlobal * 0.9) {
-    otsu = math.max(0, (meanGlobal * 0.78).round());
-  }
-  if (otsu < 1) otsu = 1;
-
-  var r = (math.min(w, h) / 26).round();
-  r = r.clamp(10, 48);
-
-  final iw = w + 1;
-  final integral = Float64List(iw * (h + 1));
-  final integralSq = Float64List(iw * (h + 1));
+  final out = Uint8List(w * h);
+  final state = _BinarizeState(
+    gray: gray,
+    w: w,
+    h: h,
+    thresholdParam: thresholdParam,
+    suppressFlatBackground: suppressFlatBackground,
+    out: out,
+  );
   for (var y = 0; y < h; y++) {
-    var rs = 0.0;
-    var rsq = 0.0;
-    final rowSrc = y * w;
-    final rowDst = (y + 1) * iw;
-    final rowPrev = y * iw;
-    for (var x = 0; x < w; x++) {
-      final v = gray[rowSrc + x].toDouble();
-      rs += v;
-      rsq += v * v;
-      integral[rowDst + x + 1] = integral[rowPrev + x + 1] + rs;
-      integralSq[rowDst + x + 1] = integralSq[rowPrev + x + 1] + rsq;
+    state.processRow(y);
+  }
+  return out;
+}
+
+Future<Uint8List> binarizeGrayAsync(
+  Uint8List gray,
+  int w,
+  int h,
+  num thresholdParam, {
+  bool suppressFlatBackground = false,
+  required Future<void> Function() maybeYield,
+}) async {
+  final out = Uint8List(w * h);
+  final state = _BinarizeState(
+    gray: gray,
+    w: w,
+    h: h,
+    thresholdParam: thresholdParam,
+    suppressFlatBackground: suppressFlatBackground,
+    out: out,
+  );
+  for (var y = 0; y < h; y++) {
+    state.processRow(y);
+    if ((y & 31) == 31) {
+      await maybeYield();
+    }
+  }
+  return out;
+}
+
+class _BinarizeState {
+  _BinarizeState({
+    required this.gray,
+    required this.w,
+    required this.h,
+    required num thresholdParam,
+    required this.suppressFlatBackground,
+    required this.out,
+  })  : r = (math.min(w, h) / 26).round().clamp(10, 48),
+        shift = (50.0 - thresholdParam.toDouble().clamp(0.0, 100.0)) * 0.9,
+        colSum = Int32List(w),
+        colSumSq = Int32List(w) {
+    final n = w * h;
+    final hist = histogram(gray);
+    var sumAll = 0;
+    for (var i = 0; i < 256; i++) {
+      sumAll += i * hist[i];
+    }
+    final meanGlobal = sumAll / n;
+    var otsuVal = otsuThreshold(hist);
+    if (otsuVal > meanGlobal * 0.9) {
+      otsuVal = math.max(0, (meanGlobal * 0.78).round());
+    }
+    if (otsuVal < 1) otsuVal = 1;
+    otsu = otsuVal;
+
+    _prevY0 = 0;
+    _prevY1 = math.min(h - 1, r);
+    for (var yy = 0; yy <= _prevY1; yy++) {
+      final rowBase = yy * w;
+      for (var x = 0; x < w; x++) {
+        final v = gray[rowBase + x];
+        colSum[x] += v;
+        colSumSq[x] += v * v;
+      }
     }
   }
 
-  final shift = (50.0 - thresholdParam.toDouble().clamp(0.0, 100.0)) * 0.9;
-  const k = 0.18;
-  final out = Uint8List(n);
-  for (var y = 0; y < h; y++) {
+  final Uint8List gray;
+  final int w;
+  final int h;
+  final int r;
+  final double shift;
+  final bool suppressFlatBackground;
+  final Uint8List out;
+  final Int32List colSum;
+  final Int32List colSumSq;
+  late final int otsu;
+  late int _prevY0;
+  late int _prevY1;
+
+  void processRow(int y) {
     final y0 = y - r < 0 ? 0 : y - r;
     final y1 = y + r >= h ? h - 1 : y + r;
-    final rowTop = y0 * iw;
-    final rowBot = (y1 + 1) * iw;
+    if (y > 0) {
+      if (y0 > _prevY0) {
+        final rmBase = _prevY0 * w;
+        for (var x = 0; x < w; x++) {
+          final v = gray[rmBase + x];
+          colSum[x] -= v;
+          colSumSq[x] -= v * v;
+        }
+      }
+      if (y1 > _prevY1) {
+        final addBase = y1 * w;
+        for (var x = 0; x < w; x++) {
+          final v = gray[addBase + x];
+          colSum[x] += v;
+          colSumSq[x] += v * v;
+        }
+      }
+      _prevY0 = y0;
+      _prevY1 = y1;
+    }
+
+    final winH = y1 - y0 + 1;
+    var prevX0 = 0;
+    var prevX1 = math.min(w - 1, r);
+    var s = 0;
+    var sq = 0;
+    for (var x = 0; x <= prevX1; x++) {
+      s += colSum[x];
+      sq += colSumSq[x];
+    }
+
+    const k = 0.18;
     final row = y * w;
     for (var x = 0; x < w; x++) {
       final x0 = x - r < 0 ? 0 : x - r;
       final x1 = x + r >= w ? w - 1 : x + r;
-      final area = (x1 - x0 + 1) * (y1 - y0 + 1);
-      final a = rowTop + x0;
-      final b = rowTop + x1 + 1;
-      final c = rowBot + x0;
-      final d = rowBot + x1 + 1;
-      final s = integral[d] - integral[b] - integral[c] + integral[a];
-      final sq = integralSq[d] - integralSq[b] - integralSq[c] + integralSq[a];
+      if (x > 0) {
+        if (x0 > prevX0) {
+          s -= colSum[prevX0];
+          sq -= colSumSq[prevX0];
+        }
+        if (x1 > prevX1) {
+          s += colSum[x1];
+          sq += colSumSq[x1];
+        }
+        prevX0 = x0;
+        prevX1 = x1;
+      }
+
+      final area = (x1 - x0 + 1) * winH;
       final mean = s / area;
       var variance = sq / area - mean * mean;
       if (variance < 0) variance = 0;
@@ -582,74 +1028,100 @@ Uint8List binarizeGray(
       out[row + x] = gray[row + x] > t ? 255 : 0;
     }
   }
-  return out;
+}
+
+void _despeckleBinaryRow(Uint8List bin, Uint8List out, int w, int y) {
+  final row = y * w;
+  for (var x = 1; x < w - 1; x++) {
+    final i = row + x;
+    final v = bin[i];
+    if (v == 0) {
+      if (bin[i - 1] != 0 &&
+          bin[i + 1] != 0 &&
+          bin[i - w] != 0 &&
+          bin[i + w] != 0 &&
+          bin[i - w - 1] != 0 &&
+          bin[i - w + 1] != 0 &&
+          bin[i + w - 1] != 0 &&
+          bin[i + w + 1] != 0) {
+        out[i] = 255;
+      }
+    } else if (v == 255) {
+      var blackNb = 0;
+      if (bin[i - 1] == 0) blackNb++;
+      if (bin[i + 1] == 0) blackNb++;
+      if (bin[i - w] == 0) blackNb++;
+      if (bin[i + w] == 0) blackNb++;
+      if (bin[i - w - 1] == 0) blackNb++;
+      if (bin[i - w + 1] == 0) blackNb++;
+      if (bin[i + w - 1] == 0) blackNb++;
+      if (bin[i + w + 1] == 0) blackNb++;
+      if (blackNb >= 6) out[i] = 0;
+    }
+  }
 }
 
 /// 二值图清理（抗纸面杂点，保留细笔画）
 Uint8List despeckleBinary(Uint8List bin, int w, int h) {
   final out = Uint8List.fromList(bin);
   for (var y = 1; y < h - 1; y++) {
-    final row = y * w;
-    for (var x = 1; x < w - 1; x++) {
-      final i = row + x;
-      final v = bin[i];
-      if (v == 0) {
-        if (bin[i - 1] != 0 &&
-            bin[i + 1] != 0 &&
-            bin[i - w] != 0 &&
-            bin[i + w] != 0 &&
-            bin[i - w - 1] != 0 &&
-            bin[i - w + 1] != 0 &&
-            bin[i + w - 1] != 0 &&
-            bin[i + w + 1] != 0) {
-          out[i] = 255;
-        }
-      } else if (v == 255) {
-        var blackNb = 0;
-        if (bin[i - 1] == 0) blackNb++;
-        if (bin[i + 1] == 0) blackNb++;
-        if (bin[i - w] == 0) blackNb++;
-        if (bin[i + w] == 0) blackNb++;
-        if (bin[i - w - 1] == 0) blackNb++;
-        if (bin[i - w + 1] == 0) blackNb++;
-        if (bin[i + w - 1] == 0) blackNb++;
-        if (bin[i + w + 1] == 0) blackNb++;
-        if (blackNb >= 6) out[i] = 0;
-      }
+    _despeckleBinaryRow(bin, out, w, y);
+  }
+  return out;
+}
+
+Future<Uint8List> despeckleBinaryAsync(
+  Uint8List bin,
+  int w,
+  int h, {
+  required Future<void> Function() maybeYield,
+}) async {
+  final out = Uint8List.fromList(bin);
+  for (var y = 1; y < h - 1; y++) {
+    _despeckleBinaryRow(bin, out, w, y);
+    if ((y & 31) == 31) {
+      await maybeYield();
     }
   }
   return out;
+}
+
+({double gr, double gg, double gb, double ar, double ag, double ab}) _paperToneCoeff(
+  PaperTone paper,
+) {
+  if (paper == PaperTone.warm) {
+    return (gr: 1.02, gg: 0.995, gb: 0.9, ar: 6.0, ag: 2.0, ab: 0.0);
+  }
+  if (paper == PaperTone.gray) {
+    return (gr: 0.945, gg: 0.955, gb: 0.975, ar: 0.0, ag: 0.0, ab: 0.0);
+  }
+  return (gr: 1.0, gg: 1.0, gb: 1.0, ar: 0.0, ag: 0.0, ab: 0.0);
 }
 
 /// 纸色映射：单通道灰度 → RGB 三通道
 Uint8List paperToneRgb(Uint8List gray, int w, int h, PaperTone paper) {
   final n = w * h;
   final out = Uint8List(n * 3);
-  var gr = 1.0;
-  var gg = 1.0;
-  var gb = 1.0;
-  var ar = 0.0;
-  var ag = 0.0;
-  var ab = 0.0;
-  if (paper == PaperTone.warm) {
-    gr = 1.02;
-    gg = 0.995;
-    gb = 0.9;
-    ar = 6;
-    ag = 2;
-    ab = 0;
-  } else if (paper == PaperTone.gray) {
-    gr = 0.945;
-    gg = 0.955;
-    gb = 0.975;
-  }
+  final c = _paperToneCoeff(paper);
   for (var i = 0, p = 0; i < n; i++, p += 3) {
     final v = gray[i];
-    out[p] = clamp255(v * gr + ar);
-    out[p + 1] = clamp255(v * gg + ag);
-    out[p + 2] = clamp255(v * gb + ab);
+    out[p] = clamp255(v * c.gr + c.ar);
+    out[p + 1] = clamp255(v * c.gg + c.ag);
+    out[p + 2] = clamp255(v * c.gb + c.ab);
   }
   return out;
+}
+
+/// 纸色映射（原地）：彩色模式 RGBA
+Uint8List paperToneRgba(Uint8List rgba, int n, PaperTone paper) {
+  if (paper == PaperTone.white) return rgba;
+  final c = _paperToneCoeff(paper);
+  for (var i = 0, p = 0; i < n; i++, p += 4) {
+    rgba[p] = clamp255(rgba[p] * c.gr + c.ar);
+    rgba[p + 1] = clamp255(rgba[p + 1] * c.gg + c.ag);
+    rgba[p + 2] = clamp255(rgba[p + 2] * c.gb + c.ab);
+  }
+  return rgba;
 }
 
 /// 反相（原地）

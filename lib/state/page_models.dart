@@ -414,6 +414,14 @@ class PagesState {
     return PagesState(pages: next, currentIndex: currentIndex);
   }
 
+  PagesState restoreStylePatches(Map<String, Map<String, Object?>> styleById) {
+    final next = pages.map((p) {
+      final patch = styleById[p.id];
+      return patch != null ? p.copyWith(options: p.options.applyStylePatch(patch)) : p;
+    }).toList(growable: false);
+    return PagesState(pages: next, currentIndex: currentIndex);
+  }
+
   PagesState rotatePage(String id) {
     final next = pages.map((p) {
       if (p.id != id) return p;

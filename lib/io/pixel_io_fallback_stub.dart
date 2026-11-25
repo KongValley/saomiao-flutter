@@ -2,7 +2,10 @@ import 'dart:typed_data';
 
 import '../engine/detect.dart';
 
-Future<RgbaSource?> decodePlatformImageFallback(Uint8List bytes) async {
+Future<RgbaSource?> decodePlatformImageFallback(
+  Uint8List bytes, {
+  int? maxPixels,
+}) async {
   return null;
 }
 

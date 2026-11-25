@@ -41,6 +41,11 @@ void main() {
 
     final same = resizeImage(src, 5, 3, 3, 5, 3);
     expect(identical(same.data, src), isTrue);
+
+    final ch5 = Uint8List(4 * 4 * 5)..fillRange(0, 4 * 4 * 5, 90);
+    final out5 = resizeImage(ch5, 4, 4, 5, 2, 2);
+    expect(out5.data.length, 2 * 2 * 5);
+    expect(out5.data[4], 90);
   });
 
   test('rotateImage：90/180/270 与转四次复原', () {

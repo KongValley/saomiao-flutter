@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -142,5 +143,24 @@ void main() {
       }
     }
     expect(detectSkewAngle(gray, w, h), 0.0);
+
+    // 纯 0 / 255 二值倾斜黑字行也应检测出非零倾角
+    final slanted = Uint8List(w * h)..fillRange(0, w * h, 255);
+    const tanA = 0.0875; // ~5 deg
+    for (var band = 0; band < 5; band++) {
+      final yCenter = 80 + band * 70;
+      for (var x = 60; x < w - 60; x++) {
+        final yc = (yCenter + (x - w / 2) * tanA).round();
+        for (var dy = -4; dy <= 4; dy++) {
+          final yy = yc + dy;
+          if (yy >= 0 && yy < h) {
+            slanted[yy * w + x] = 0;
+          }
+        }
+      }
+    }
+    final detected = detectSkewAngle(slanted, w, h);
+    expect(detected.abs() > 0.02, isTrue);
+    expect((detected.abs() - math.atan(tanA)).abs() < 0.03, isTrue);
   });
 }
